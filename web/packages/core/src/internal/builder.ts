@@ -114,6 +114,12 @@ export function configureBuilder(
         }
     }
 
+    if (isExplicit(config.httpProxy)) {
+        for (const proxy of config.httpProxy) {
+            builder.addHttpProxy(proxy.origin, proxy.proxyUrl);
+        }
+    }
+
     if (isExplicit(config.gamepadButtonMapping)) {
         for (const [button, keyCode] of Object.entries(
             config.gamepadButtonMapping,
