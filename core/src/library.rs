@@ -607,20 +607,70 @@ impl<'gc> Library<'gc> {
             .collect();
 
         if !fonts.is_empty() {
-            return fonts;
+            return self.with_default_sans_fallbacks(
+                fonts,
+                query.is_bold,
+                query.is_italic,
+                ui,
+                renderer,
+                gc_context,
+            );
         }
 
         // When the backend failed (or doesn't support sorting fonts), fall back
         // to loading one font only without sorting.
-        let font = self.get_or_load_device_font(
-            &query.name,
+        let mut fonts = self
+            .get_or_load_device_font(
+                &query.name,
+                query.is_bold,
+                query.is_italic,
+                ui,
+                renderer,
+                gc_context,
+            )
+            .map(|font| vec![font])
+            .unwrap_or_default();
+
+        fonts = self.with_default_sans_fallbacks(
+            fonts,
             query.is_bold,
             query.is_italic,
             ui,
             renderer,
             gc_context,
         );
-        font.map(|font| vec![font]).unwrap_or_default()
+
+        fonts
+    }
+
+    fn with_default_sans_fallbacks(
+        &mut self,
+        mut fonts: Vec<Font<'gc>>,
+        is_bold: bool,
+        is_italic: bool,
+        ui: &dyn UiBackend,
+        renderer: &mut dyn RenderBackend,
+        gc_context: &Mutation<'gc>,
+    ) -> Vec<Font<'gc>> {
+        let fallback_fonts = self.default_font(
+            DefaultFont::Sans,
+            is_bold,
+            is_italic,
+            ui,
+            renderer,
+            gc_context,
+        );
+
+        for fallback_font in fallback_fonts {
+            if !fonts
+                .iter()
+                .any(|font| font.descriptor() == fallback_font.descriptor())
+            {
+                fonts.push(fallback_font);
+            }
+        }
+
+        fonts
     }
 
     pub fn get_or_sort_device_fonts(
