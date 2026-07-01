@@ -365,6 +365,12 @@ impl ActivePlayer {
                     "Tinos".into(),
                     "Liberation Serif".into(),
                     "DejaVu Serif".into(),
+                    "SimSun".into(),
+                    "NSimSun".into(),
+                    "Noto Serif CJK SC".into(),
+                    "Source Han Serif SC".into(),
+                    "Microsoft YaHei".into(),
+                    "Microsoft JhengHei".into(),
                 ],
             );
             player_lock.set_default_font(
@@ -374,6 +380,15 @@ impl ActivePlayer {
                     "Arimo".into(),
                     "Liberation Sans".into(),
                     "DejaVu Sans".into(),
+                    "Microsoft YaHei".into(),
+                    "Microsoft YaHei UI".into(),
+                    "SimHei".into(),
+                    "SimSun".into(),
+                    "Noto Sans CJK SC".into(),
+                    "Source Han Sans SC".into(),
+                    "Noto Sans CJK".into(),
+                    "Source Han Sans".into(),
+                    "Microsoft JhengHei".into(),
                 ],
             );
             player_lock.set_default_font(
@@ -383,6 +398,11 @@ impl ActivePlayer {
                     "Cousine".into(),
                     "Liberation Mono".into(),
                     "DejaVu Sans Mono".into(),
+                    "NSimSun".into(),
+                    "SimSun".into(),
+                    "DengXian".into(),
+                    "Noto Sans Mono CJK SC".into(),
+                    "Noto Sans CJK SC".into(),
                 ],
             );
             player_lock.set_default_font(
@@ -391,6 +411,9 @@ impl ActivePlayer {
                     "ヒラギノ角ゴ Pro W3".into(), // Mac with Japanese environment
                     "MS UI Gothic".into(),        // Windows
                     "Noto Sans CJK JP".into(),    // Linux
+                    "Microsoft YaHei".into(),     // Windows Chinese fallback
+                    "SimHei".into(),              // Windows Chinese fallback
+                    "Noto Sans CJK SC".into(),    // Linux Chinese fallback
                     "Arial Unicode MS".into(),    // Mac fallback
                 ],
             );
@@ -400,6 +423,9 @@ impl ActivePlayer {
                     "Osaka－等幅".into(),      // Mac with Japanese environment
                     "MS Gothic".into(),        // Windows
                     "Noto Sans CJK JP".into(), // Linux
+                    "NSimSun".into(),          // Windows Chinese fallback
+                    "SimSun".into(),           // Windows Chinese fallback
+                    "Noto Sans CJK SC".into(), // Linux Chinese fallback
                     "Arial Unicode MS".into(), // Mac fallback
                 ],
             );
@@ -409,6 +435,10 @@ impl ActivePlayer {
                     "ヒラギノ明朝 Pro W3".into(), // Mac with Japanese environment
                     "MS PMincho".into(),          // Windows
                     "Noto Sans CJK JP".into(),    // Linux
+                    "SimSun".into(),              // Windows Chinese fallback
+                    "NSimSun".into(),             // Windows Chinese fallback
+                    "Noto Serif CJK SC".into(),   // Linux Chinese fallback
+                    "Noto Sans CJK SC".into(),    // Linux Chinese fallback
                     "Arial Unicode MS".into(),    // Mac fallback
                 ],
             );
