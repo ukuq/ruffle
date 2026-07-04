@@ -697,6 +697,13 @@ impl RuffleInstanceBuilder {
     }
 
     pub fn create_storage_backend(&self) -> Box<dyn StorageBackend> {
+        if let Some(storage) =
+            storage::JavaScriptStorageBackend::from_window_property("RuffleAndroidStorage")
+        {
+            tracing::info!("Using JavaScript storage backend: RuffleAndroidStorage");
+            return Box::new(storage);
+        }
+
         match web_sys::window().expect("window()").local_storage() {
             Ok(Some(s)) => Box::new(storage::LocalStorageBackend::new(s)),
             err => {
