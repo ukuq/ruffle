@@ -9,10 +9,9 @@ use crate::util::{
 };
 use anyhow::Error;
 use gilrs::{Event, EventType, Gilrs};
-use ruffle_core::FloatDuration;
-use ruffle_core::PlayerEvent;
 use ruffle_core::events::{ImeEvent, ImeNotification, PlayerNotification};
 use ruffle_core::swf::HeaderExt;
+use ruffle_core::{FloatDuration, PlayerEvent};
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
@@ -49,6 +48,8 @@ struct MainWindow {
     last_diagnostics_log: Instant,
     host_ticks: u64,
     rendered_frames: u64,
+    movie_size: Option<LogicalSize<f64>>,
+    last_player_viewport: Option<ViewportDimensions>,
 }
 
 impl MainWindow {
@@ -73,7 +74,8 @@ impl MainWindow {
             return;
         }
 
-        if self.gui.handle_event(&event) {
+        let is_resize = matches!(event, WindowEvent::Resized(_));
+        if self.gui.handle_event(&event) && !is_resize {
             // Event consumed by GUI.
             return;
         }
@@ -89,14 +91,7 @@ impl MainWindow {
                 // on Wayland it always returns `None`.)
                 self.minimized = size.width == 0 && size.height == 0;
 
-                if let Some(mut player) = self.player.get() {
-                    let viewport_scale_factor = self.gui.window().scale_factor();
-                    player.set_viewport_dimensions(ViewportDimensions {
-                        width: size.width,
-                        height: size.height.saturating_sub(self.gui.height_offset() as u32),
-                        scale_factor: viewport_scale_factor,
-                    });
-                }
+                self.sync_player_viewport(size);
                 self.gui.window().request_redraw();
                 if matches!(self.loaded, LoadingState::WaitingForResize) {
                     self.loaded = LoadingState::Loaded;
@@ -129,6 +124,8 @@ impl MainWindow {
             }
             WindowEvent::DroppedFile(file) => {
                 if let Some(content_descriptor) = ContentDescriptor::new_local(&file, None) {
+                    self.movie_size = None;
+                    self.last_player_viewport = None;
                     self.gui.create_movie(
                         &mut self.player,
                         LaunchOptions::from(&self.preferences),
@@ -280,15 +277,15 @@ impl MainWindow {
         } else {
             MENU_HEIGHT as f64
         };
+        let movie_width = swf_header.stage_size().width().to_pixels();
+        let movie_height = swf_header.stage_size().height().to_pixels();
+        self.movie_size = Some(LogicalSize::new(movie_width, movie_height));
 
         // To prevent issues like waiting on resize indefinitely (#11364) or desyncing the window state on Windows,
         // do not resize while window is maximized.
         let should_resize = !self.gui.window().is_maximized();
 
         let (viewport_size, state) = if should_resize {
-            let movie_width = swf_header.stage_size().width().to_pixels();
-            let movie_height = swf_header.stage_size().height().to_pixels();
-
             let window_size: Size = match (self.preferred_width, self.preferred_height) {
                 (None, None) => LogicalSize::new(movie_width, movie_height + height_offset).into(),
                 (Some(width), None) => {
@@ -360,13 +357,65 @@ impl MainWindow {
         });
         self.gui.window().set_visible(true);
 
+        self.sync_player_viewport(viewport_size);
+    }
+
+    fn sync_player_viewport(&mut self, viewport_size: PhysicalSize<u32>) {
         let viewport_scale_factor = self.gui.window().scale_factor();
+        let (width, height) = if let Some(movie_size) = self.movie_size {
+            (
+                (movie_size.width * viewport_scale_factor).round().max(1.0) as u32,
+                (movie_size.height * viewport_scale_factor).round().max(1.0) as u32,
+            )
+        } else {
+            (
+                viewport_size.width,
+                viewport_size
+                    .height
+                    .saturating_sub(self.gui.height_offset() as u32),
+            )
+        };
+
+        let dimensions = ViewportDimensions {
+            width,
+            height,
+            scale_factor: viewport_scale_factor,
+        };
+        self.gui
+            .set_movie_viewport_size(PhysicalSize::new(width, height));
+
+        let should_update = self.last_player_viewport.is_none_or(|previous| {
+            previous.width != dimensions.width
+                || previous.height != dimensions.height
+                || previous.scale_factor != dimensions.scale_factor
+        });
+
+        if !should_update {
+            return;
+        }
+
         if let Some(mut player) = self.player.get() {
-            player.set_viewport_dimensions(ViewportDimensions {
-                width: viewport_size.width,
-                height: viewport_size.height - (height_offset * viewport_scale_factor) as u32,
-                scale_factor: viewport_scale_factor,
-            });
+            player.set_viewport_dimensions(dimensions);
+            self.last_player_viewport = Some(dimensions);
+        }
+    }
+
+    fn set_player_fullscreen(&mut self, is_fullscreen: bool) {
+        let updated = {
+            if let Some(mut player) = self.player.get()
+                && player.is_playing()
+            {
+                player.set_fullscreen(is_fullscreen);
+                true
+            } else {
+                false
+            }
+        };
+
+        if updated {
+            let viewport_size = self.gui.window().inner_size();
+            self.sync_player_viewport(viewport_size);
+            self.gui.window().request_redraw();
         }
     }
 
@@ -632,6 +681,8 @@ impl ApplicationHandler<RuffleEvent> for App {
                 last_diagnostics_log: Instant::now(),
                 host_ticks: 0,
                 rendered_frames: 0,
+                movie_size: None,
+                last_player_viewport: None,
             });
         }
     }
@@ -677,6 +728,8 @@ impl ApplicationHandler<RuffleEvent> for App {
             }
 
             (Some(main_window), RuffleEvent::Open(desc, options)) => {
+                main_window.movie_size = None;
+                main_window.last_player_viewport = None;
                 main_window
                     .gui
                     .create_movie(&mut main_window.player, *options, desc);
@@ -688,6 +741,8 @@ impl ApplicationHandler<RuffleEvent> for App {
 
             (Some(main_window), RuffleEvent::CloseFile) => {
                 main_window.gui.window().set_title("Ruffle"); // Reset title since file has been closed.
+                main_window.movie_size = None;
+                main_window.last_player_viewport = None;
                 main_window.gui.close_movie(&mut main_window.player);
             }
 
@@ -696,19 +751,11 @@ impl ApplicationHandler<RuffleEvent> for App {
             }
 
             (Some(main_window), RuffleEvent::EnterFullScreen) => {
-                if let Some(mut player) = main_window.player.get()
-                    && player.is_playing()
-                {
-                    player.set_fullscreen(true);
-                }
+                main_window.set_player_fullscreen(true);
             }
 
             (Some(main_window), RuffleEvent::ExitFullScreen) => {
-                if let Some(mut player) = main_window.player.get()
-                    && player.is_playing()
-                {
-                    player.set_fullscreen(false);
-                }
+                main_window.set_player_fullscreen(false);
             }
 
             (Some(main_window), RuffleEvent::PlayerNotification(notification)) => {

@@ -250,6 +250,11 @@ impl UiBackend for DesktopUiBackend {
         } else {
             None
         });
+        let _ = self.event_loop.send_event(if is_full {
+            RuffleEvent::EnterFullScreen
+        } else {
+            RuffleEvent::ExitFullScreen
+        });
         Ok(())
     }
 

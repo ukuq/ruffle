@@ -2,7 +2,7 @@ use super::dialogs::export_bundle_dialog::ExportBundleDialogConfiguration;
 use super::{DialogDescriptor, FilePicker};
 use crate::backends::DesktopUiBackend;
 use crate::custom_event::RuffleEvent;
-use crate::gui::movie::{MovieView, MovieViewRenderer};
+use crate::gui::movie::{MovieView, MovieViewRenderer, get_movie_view_layout};
 use crate::gui::theme::ThemeController;
 use crate::gui::{MENU_HEIGHT, RuffleGui};
 use crate::player::{LaunchOptions, PlayerController};
@@ -42,6 +42,7 @@ pub struct GuiController {
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
     movie_view_renderer: Arc<MovieViewRenderer>,
+    movie_viewport_size: PhysicalSize<u32>,
     // Note that `window.get_inner_size` can change at any point on x11, even between two lines of code.
     // Use this instead.
     size: PhysicalSize<u32>,
@@ -128,12 +129,18 @@ impl GuiController {
         );
         egui_winit.set_max_texture_side(descriptors.limits.max_texture_dimension_2d as usize);
 
+        let show_menu = window.fullscreen().is_none() && !no_gui;
+        let movie_viewport_size =
+            default_movie_viewport_size(size, show_menu, window.scale_factor());
         let movie_view_renderer = Arc::new(MovieViewRenderer::new(
             &descriptors.device,
             surface_format,
-            window.fullscreen().is_none() && !no_gui,
+            show_menu,
+            size.width,
             size.height,
             window.scale_factor(),
+            movie_viewport_size.width,
+            movie_viewport_size.height,
         ));
         let egui_renderer = egui_wgpu::Renderer::new(
             &descriptors.device,
@@ -175,6 +182,7 @@ impl GuiController {
             surface,
             surface_format,
             movie_view_renderer,
+            movie_viewport_size,
             size,
             no_gui,
             theme_controller,
@@ -221,11 +229,33 @@ impl GuiController {
                 view_formats: Default::default(),
             },
         );
-        self.movie_view_renderer.update_resolution(
-            &self.descriptors,
-            self.window.fullscreen().is_none() && !self.no_gui,
+        self.update_movie_layout();
+    }
+
+    fn show_menu(&self) -> bool {
+        self.window.fullscreen().is_none() && !self.no_gui
+    }
+
+    fn movie_view_layout(&self) -> crate::gui::movie::MovieViewLayout {
+        get_movie_view_layout(
+            self.show_menu(),
+            self.size.width,
             self.size.height,
             self.window.scale_factor(),
+            self.movie_viewport_size.width,
+            self.movie_viewport_size.height,
+        )
+    }
+
+    fn update_movie_layout(&self) {
+        self.movie_view_renderer.update_resolution(
+            &self.descriptors,
+            self.show_menu(),
+            self.size.width,
+            self.size.height,
+            self.window.scale_factor(),
+            self.movie_viewport_size.width,
+            self.movie_viewport_size.height,
         );
     }
 
@@ -274,11 +304,14 @@ impl GuiController {
         tracing::info!("Opening {}", content_descriptor.describe());
 
         self.close_movie(player);
+        self.movie_viewport_size =
+            default_movie_viewport_size(self.size, self.show_menu(), self.window.scale_factor());
+        self.update_movie_layout();
         let movie_view = MovieView::new(
             self.movie_view_renderer.clone(),
             &self.descriptors.device,
-            self.size.width,
-            self.size.height,
+            self.movie_viewport_size.width,
+            self.movie_viewport_size.height,
             #[cfg(feature = "tracy_images")]
             self.tracy_frame_captures.clone(),
         );
@@ -300,15 +333,41 @@ impl GuiController {
         }
     }
 
+    pub fn set_movie_viewport_size(&mut self, size: PhysicalSize<u32>) {
+        let size = PhysicalSize::new(size.width.max(1), size.height.max(1));
+        if self.movie_viewport_size != size {
+            self.movie_viewport_size = size;
+            self.update_movie_layout();
+        }
+    }
+
     pub fn window_to_movie_position(&self, position: PhysicalPosition<f64>) -> (f64, f64) {
-        let x = position.x;
-        let y = position.y - self.height_offset();
+        let layout = self.movie_view_layout();
+        let x =
+            ((position.x - layout.left) / layout.width) * f64::from(self.movie_viewport_size.width);
+        let y = ((position.y - layout.top) / layout.height)
+            * f64::from(self.movie_viewport_size.height);
         (x, y)
     }
 
     pub fn movie_to_window_position(&self, x: f64, y: f64) -> PhysicalPosition<f64> {
-        let y = y + self.height_offset();
-        PhysicalPosition::new(x, y)
+        let layout = self.movie_view_layout();
+        PhysicalPosition::new(
+            layout.left + (x / f64::from(self.movie_viewport_size.width)) * layout.width,
+            layout.top + (y / f64::from(self.movie_viewport_size.height)) * layout.height,
+        )
+    }
+
+    fn movie_to_window_size(&self, width: f64, height: f64) -> PhysicalSize<u32> {
+        let layout = self.movie_view_layout();
+        PhysicalSize::new(
+            ((width / f64::from(self.movie_viewport_size.width)) * layout.width)
+                .round()
+                .max(1.0) as u32,
+            ((height / f64::from(self.movie_viewport_size.height)) * layout.height)
+                .round()
+                .max(1.0) as u32,
+        )
     }
 
     pub fn render(&mut self, mut player: Option<MutexGuard<Player>>) {
@@ -443,6 +502,14 @@ impl GuiController {
             None
         };
 
+        if let Some(movie_view) = movie_view {
+            let movie_viewport_size = PhysicalSize::new(movie_view.width(), movie_view.height());
+            if self.movie_viewport_size != movie_viewport_size {
+                self.movie_viewport_size = movie_viewport_size;
+            }
+            self.update_movie_layout();
+        }
+
         {
             let surface_view = surface_texture.texture.create_view(&Default::default());
 
@@ -552,7 +619,7 @@ impl GuiController {
     pub fn set_ime_cursor_area(&self, cursor_area: ImeCursorArea) {
         self.window.set_ime_cursor_area(
             self.movie_to_window_position(cursor_area.x, cursor_area.y),
-            PhysicalSize::new(cursor_area.width, cursor_area.height),
+            self.movie_to_window_size(cursor_area.width, cursor_area.height),
         );
     }
 
@@ -570,6 +637,23 @@ impl GuiController {
             )));
         self.gui.on_player_destroyed();
     }
+}
+
+fn default_movie_viewport_size(
+    window_size: PhysicalSize<u32>,
+    has_menu: bool,
+    scale_factor: f64,
+) -> PhysicalSize<u32> {
+    let menu_height = if has_menu {
+        (MENU_HEIGHT as f64 * scale_factor).round() as u32
+    } else {
+        0
+    };
+
+    PhysicalSize::new(
+        window_size.width.max(1),
+        window_size.height.saturating_sub(menu_height).max(1),
+    )
 }
 
 fn select_wgpu_backend(
