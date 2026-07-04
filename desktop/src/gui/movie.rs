@@ -13,21 +13,95 @@ pub struct MovieViewRenderer {
     vertices: wgpu::Buffer,
 }
 
-fn get_vertices(has_menu: bool, height: u32, scale_factor: f64) -> [[f32; 4]; 6] {
-    let top = if has_menu {
-        let menu_height = MENU_HEIGHT as f64 * scale_factor;
-        1.0 - ((menu_height / height as f64) * 2.0) as f32
+#[derive(Clone, Copy, Debug)]
+pub struct MovieViewLayout {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl MovieViewLayout {
+    pub fn right(self) -> f64 {
+        self.left + self.width
+    }
+
+    pub fn bottom(self) -> f64 {
+        self.top + self.height
+    }
+}
+
+pub fn get_movie_view_layout(
+    has_menu: bool,
+    window_width: u32,
+    window_height: u32,
+    scale_factor: f64,
+    movie_width: u32,
+    movie_height: u32,
+) -> MovieViewLayout {
+    let window_width = f64::from(window_width.max(1));
+    let window_height = f64::from(window_height.max(1));
+    let movie_width = f64::from(movie_width.max(1));
+    let movie_height = f64::from(movie_height.max(1));
+
+    let menu_height = if has_menu {
+        (MENU_HEIGHT as f64 * scale_factor).min(window_height)
     } else {
-        1.0
+        0.0
     };
+    let content_top = menu_height;
+    let content_height = (window_height - content_top).max(1.0);
+
+    let movie_aspect = movie_width / movie_height;
+    let content_aspect = window_width / content_height;
+    let (draw_width, draw_height) = if content_aspect > movie_aspect {
+        let draw_height = content_height;
+        (draw_height * movie_aspect, draw_height)
+    } else {
+        let draw_width = window_width;
+        (draw_width, draw_width / movie_aspect)
+    };
+
+    MovieViewLayout {
+        left: (window_width - draw_width) / 2.0,
+        top: content_top + (content_height - draw_height) / 2.0,
+        width: draw_width,
+        height: draw_height,
+    }
+}
+
+fn get_vertices(
+    has_menu: bool,
+    window_width: u32,
+    window_height: u32,
+    scale_factor: f64,
+    movie_width: u32,
+    movie_height: u32,
+) -> [[f32; 4]; 6] {
+    let layout = get_movie_view_layout(
+        has_menu,
+        window_width,
+        window_height,
+        scale_factor,
+        movie_width,
+        movie_height,
+    );
+    let window_width = f64::from(window_width.max(1));
+    let window_height = f64::from(window_height.max(1));
+
+    let left = ((layout.left / window_width) * 2.0 - 1.0) as f32;
+    let right = ((layout.right() / window_width) * 2.0 - 1.0) as f32;
+    let top = (1.0 - (layout.top / window_height) * 2.0) as f32;
+    let bottom = (1.0 - (layout.bottom() / window_height) * 2.0) as f32;
+
     // x y u v
     [
-        [-1.0, top, 0.0, 0.0],  // tl
-        [1.0, top, 1.0, 0.0],   // tr
-        [1.0, -1.0, 1.0, 1.0],  // br
-        [1.0, -1.0, 1.0, 1.0],  // br
-        [-1.0, -1.0, 0.0, 1.0], // bl
-        [-1.0, top, 0.0, 0.0],  // tl
+        [left, top, 0.0, 0.0],     // tl
+        [right, top, 1.0, 0.0],    // tr
+        [right, bottom, 1.0, 1.0], // br
+        [right, bottom, 1.0, 1.0], // br
+        [left, bottom, 0.0, 1.0],  // bl
+        [left, top, 0.0, 0.0],     // tl
     ]
 }
 
@@ -36,8 +110,11 @@ impl MovieViewRenderer {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         has_menu: bool,
+        width: u32,
         height: u32,
         scale_factor: f64,
+        movie_width: u32,
+        movie_height: u32,
     ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
@@ -124,7 +201,14 @@ impl MovieViewRenderer {
         });
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&get_vertices(has_menu, height, scale_factor)),
+            contents: bytemuck::cast_slice(&get_vertices(
+                has_menu,
+                width,
+                height,
+                scale_factor,
+                movie_width,
+                movie_height,
+            )),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -140,13 +224,23 @@ impl MovieViewRenderer {
         &self,
         descriptors: &Descriptors,
         has_menu: bool,
+        width: u32,
         height: u32,
         scale_factor: f64,
+        movie_width: u32,
+        movie_height: u32,
     ) {
         descriptors.queue.write_buffer(
             &self.vertices,
             0,
-            bytemuck::cast_slice(&get_vertices(has_menu, height, scale_factor)),
+            bytemuck::cast_slice(&get_vertices(
+                has_menu,
+                width,
+                height,
+                scale_factor,
+                movie_width,
+                movie_height,
+            )),
         );
     }
 }
@@ -217,6 +311,14 @@ impl MovieView {
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, renderer.vertices.slice(..));
         render_pass.draw(0..6, 0..1);
+    }
+
+    pub fn width(&self) -> u32 {
+        self.texture.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.texture.height()
     }
 }
 
