@@ -40,20 +40,36 @@ impl StorageBackend for LocalStorageBackend {
 
 pub struct JavaScriptStorageBackend {
     storage: JsValue,
+    get: Function,
+    put: Function,
+    remove: Function,
 }
 
 impl JavaScriptStorageBackend {
     pub(crate) fn from_window_property(name: &str) -> Option<Self> {
         let window = web_sys::window()?;
         let storage = Reflect::get(window.as_ref(), &JsValue::from_str(name)).ok()?;
+        Self::from_value(storage)
+    }
+
+    fn from_value(storage: JsValue) -> Option<Self> {
         if storage.is_null() || storage.is_undefined() {
             return None;
         }
-        Some(Self { storage })
+
+        let get = Self::method(&storage, "get")?;
+        let put = Self::method(&storage, "put")?;
+        let remove = Self::method(&storage, "remove")?;
+        Some(Self {
+            storage,
+            get,
+            put,
+            remove,
+        })
     }
 
-    fn method(&self, name: &str) -> Option<Function> {
-        Reflect::get(&self.storage, &JsValue::from_str(name))
+    fn method(storage: &JsValue, name: &str) -> Option<Function> {
+        Reflect::get(storage, &JsValue::from_str(name))
             .ok()?
             .dyn_into::<Function>()
             .ok()
@@ -63,7 +79,7 @@ impl JavaScriptStorageBackend {
 impl StorageBackend for JavaScriptStorageBackend {
     fn get(&self, name: &str) -> Option<Vec<u8>> {
         let value = self
-            .method("get")?
+            .get
             .call1(&self.storage, &JsValue::from_str(name))
             .ok()?;
         if value.is_null() || value.is_undefined() {
@@ -73,23 +89,18 @@ impl StorageBackend for JavaScriptStorageBackend {
     }
 
     fn put(&mut self, name: &str, value: &[u8]) -> bool {
-        self.method("put")
-            .and_then(|method| {
-                method
-                    .call2(
-                        &self.storage,
-                        &JsValue::from_str(name),
-                        &JsValue::from_str(&BASE64_STANDARD.encode(value)),
-                    )
-                    .ok()
-            })
+        self.put
+            .call2(
+                &self.storage,
+                &JsValue::from_str(name),
+                &JsValue::from_str(&BASE64_STANDARD.encode(value)),
+            )
+            .ok()
             .and_then(|value| value.as_bool())
             .unwrap_or(false)
     }
 
     fn remove_key(&mut self, name: &str) {
-        if let Some(method) = self.method("remove") {
-            let _ = method.call1(&self.storage, &JsValue::from_str(name));
-        }
+        let _ = self.remove.call1(&self.storage, &JsValue::from_str(name));
     }
 }
