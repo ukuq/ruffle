@@ -8,7 +8,7 @@ use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
@@ -138,6 +138,18 @@ pub struct Opt {
     /// This directory can be deleted without affecting functionality.
     #[clap(long, default_value_os_t=get_default_cache_directory())]
     pub cache_directory: std::path::PathBuf,
+
+    /// Serve matching Seer2 HTTP requests inside Ruffle without opening a local TCP port.
+    #[clap(long, action)]
+    pub seer2_virtual_http: bool,
+
+    /// Directory containing files that override Seer2 resources.
+    #[clap(long)]
+    pub seer2_proxy_root: Option<PathBuf>,
+
+    /// Directory containing the Electron-compatible encrypted Seer2 cache.
+    #[clap(long)]
+    pub seer2_cache_directory: Option<PathBuf>,
 
     /// Proxy to use when loading movies via URL.
     #[clap(long)]
