@@ -137,6 +137,7 @@ impl GlyphShape {
 struct GlyphBitmap<'a> {
     bitmap: Cell<Option<Bitmap<'a>>>,
     handle: OnceCell<Result<BitmapInfo, Error>>,
+    has_native_color: bool,
 
     /// Translation in x to be applied before rendering the glyph.
     tx: Twips,
@@ -149,15 +150,17 @@ impl<'a> std::fmt::Debug for GlyphBitmap<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlyphBitmap")
             .field("handle", &self.handle)
+            .field("has_native_color", &self.has_native_color)
             .finish()
     }
 }
 
 impl<'a> GlyphBitmap<'a> {
-    pub fn new(bitmap: Bitmap<'a>, tx: Twips, ty: Twips) -> Self {
+    pub fn new(bitmap: Bitmap<'a>, tx: Twips, ty: Twips, has_native_color: bool) -> Self {
         Self {
             bitmap: Cell::new(Some(bitmap)),
             handle: OnceCell::new(),
+            has_native_color,
             tx,
             ty,
         }
@@ -234,8 +237,24 @@ impl Glyph {
         tx: Twips,
         ty: Twips,
     ) -> Self {
+        Self::from_bitmap_with_native_color(character, bitmap, advance, tx, ty, false)
+    }
+
+    pub fn from_bitmap_with_native_color(
+        character: char,
+        bitmap: Bitmap<'static>,
+        advance: Twips,
+        tx: Twips,
+        ty: Twips,
+        has_native_color: bool,
+    ) -> Self {
         Self {
-            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new(bitmap, tx, ty))),
+            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new(
+                bitmap,
+                tx,
+                ty,
+                has_native_color,
+            ))),
             advance,
             character,
         }
@@ -276,6 +295,13 @@ impl Glyph {
             GlyphShape::Bitmap(_) => false,
             GlyphShape::AtlasGlyph(_) => false,
             GlyphShape::None => false,
+        }
+    }
+
+    pub fn has_native_color(&self) -> bool {
+        match &self.shape {
+            GlyphShape::Bitmap(bitmap) => bitmap.has_native_color,
+            _ => false,
         }
     }
 
