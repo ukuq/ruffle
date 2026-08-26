@@ -1,4 +1,7 @@
 mod fetch;
+mod seer2_virtual_http;
+
+pub use seer2_virtual_http::Seer2VirtualHttp;
 
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
@@ -43,6 +46,25 @@ pub trait FutureSpawner<Err> {
     fn spawn(&self, future: OwnedFuture<(), Err>);
 }
 
+/// A complete in-process response supplied by a request interceptor.
+pub struct InterceptedResponse {
+    pub url: String,
+    pub body: Vec<u8>,
+    pub text_encoding: Option<&'static ruffle_core::swf::Encoding>,
+    pub status: u16,
+    pub redirected: bool,
+}
+
+/// Optionally handles a resolved request before the normal file/network paths.
+pub trait RequestInterceptor {
+    fn intercept(
+        &self,
+        request: &Request,
+        resolved_url: &Url,
+        client: Option<reqwest::Client>,
+    ) -> Option<OwnedFuture<InterceptedResponse, ErrorResponse>>;
+}
+
 /// Implementation of `NavigatorBackend` for non-web environments that can call
 /// out to a web browser.
 pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterface> {
@@ -51,6 +73,9 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterfa
 
     /// The url to use for all relative fetches.
     base_url: Url,
+
+    /// Optional in-process handler for selected URLs.
+    request_interceptor: Option<Rc<dyn RequestInterceptor>>,
 
     // Client to use for network requests
     client: Option<Rc<reqwest::Client>>,
@@ -155,6 +180,7 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
             future_spawner,
             client,
             base_url,
+            request_interceptor: None,
             upgrade_to_https,
             socket_allowed,
             socket_mode,
@@ -175,6 +201,11 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
     pub fn set_content(&mut self, base_url: Url, content: Rc<PlayingContent>) {
         self.set_base_url(base_url);
         self.content = content;
+    }
+
+    /// Install an in-process request interceptor.
+    pub fn set_request_interceptor(&mut self, interceptor: Rc<dyn RequestInterceptor>) {
+        self.request_interceptor = Some(interceptor);
     }
 
     fn directory_base_url(mut url: Url) -> Url {
@@ -246,6 +277,41 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
         };
 
         let client = self.client.clone();
+
+        if let Some(interceptor) = &self.request_interceptor
+            && let Some(future) =
+                interceptor.intercept(&request, &processed_url, client.as_deref().cloned())
+        {
+            return Box::pin(async move {
+                let response = future.await?;
+                let InterceptedResponse {
+                    url,
+                    body,
+                    text_encoding,
+                    status,
+                    redirected,
+                } = response;
+
+                if !(200..300).contains(&status) {
+                    let status_text = reqwest::StatusCode::from_u16(status).map_or_else(
+                        |_| format!("Got HTTP status {status}"),
+                        |status| format!("Got {status}"),
+                    );
+                    let error =
+                        Error::HttpNotOk(status_text, status, redirected, body.len() as u64);
+                    return Err(ErrorResponse { url, error });
+                }
+
+                let response: Box<dyn SuccessResponse> = Box::new(Response {
+                    url,
+                    response_body: ResponseBody::File(Ok(body)),
+                    text_encoding,
+                    status,
+                    redirected,
+                });
+                Ok(response)
+            });
+        }
 
         match processed_url.scheme() {
             "file" => {

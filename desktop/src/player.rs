@@ -15,7 +15,9 @@ use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::font::DefaultFont;
 use ruffle_core::{LoadBehavior, Player, PlayerBuilder, PlayerEvent};
 use ruffle_frontend_utils::backends::audio::CpalAudioBackend;
-use ruffle_frontend_utils::backends::navigator::{ExternalNavigatorBackend, FutureSpawner};
+use ruffle_frontend_utils::backends::navigator::{
+    ExternalNavigatorBackend, FutureSpawner, Seer2VirtualHttp,
+};
 use ruffle_frontend_utils::bundle::source::BundleSourceError;
 use ruffle_frontend_utils::bundle::{Bundle, BundleError};
 use ruffle_frontend_utils::content::{ContentDescriptor, PlayingContent};
@@ -48,6 +50,9 @@ pub struct LaunchOptions {
     pub fullscreen: bool,
     pub save_directory: PathBuf,
     pub cache_directory: PathBuf,
+    pub seer2_virtual_http: bool,
+    pub seer2_proxy_root: Option<PathBuf>,
+    pub seer2_cache_directory: Option<PathBuf>,
     pub filesystem_access_mode: FilesystemAccessMode,
     pub gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
     pub avm2_optimizer_enabled: bool,
@@ -96,6 +101,9 @@ impl From<&GlobalPreferences> for LaunchOptions {
             fullscreen: value.cli.fullscreen,
             save_directory: value.cli.save_directory.clone(),
             cache_directory: value.cli.cache_directory.clone(),
+            seer2_virtual_http: value.cli.seer2_virtual_http,
+            seer2_proxy_root: value.cli.seer2_proxy_root.clone(),
+            seer2_cache_directory: value.cli.seer2_cache_directory.clone(),
             filesystem_access_mode: value.cli.filesystem_access_mode,
             socket_allowed: HashSet::from_iter(value.cli.socket_allow.iter().cloned()),
             tcp_connections: value.cli.tcp_connections,
@@ -196,6 +204,9 @@ impl ActivePlayer {
                     fullscreen: opt.fullscreen,
                     save_directory: opt.save_directory.clone(),
                     cache_directory: opt.cache_directory.clone(),
+                    seer2_virtual_http: opt.seer2_virtual_http,
+                    seer2_proxy_root: opt.seer2_proxy_root.clone(),
+                    seer2_cache_directory: opt.seer2_cache_directory.clone(),
                     filesystem_access_mode: opt.filesystem_access_mode,
                     gamepad_button_mapping: opt.gamepad_button_mapping.clone(),
                     avm2_optimizer_enabled: opt.avm2_optimizer_enabled,
@@ -210,7 +221,7 @@ impl ActivePlayer {
         let movie_url = content.initial_swf_url().clone();
         let readable_name = content.name();
         let initial_allow_list = PathAllowList::new(content_descriptor);
-        let navigator = ExternalNavigatorBackend::new(
+        let mut navigator = ExternalNavigatorBackend::new(
             opt.player
                 .base
                 .to_owned()
@@ -230,6 +241,29 @@ impl ActivePlayer {
                 opt.filesystem_access_mode,
             ),
         );
+
+        if opt.seer2_virtual_http {
+            let cache_directory = opt
+                .seer2_cache_directory
+                .clone()
+                .unwrap_or_else(|| opt.cache_directory.join("seer2"));
+            match Seer2VirtualHttp::new(
+                &movie_url,
+                cache_directory.clone(),
+                opt.seer2_proxy_root.clone(),
+            ) {
+                Ok(interceptor) => {
+                    tracing::info!(
+                        "Seer2 virtual HTTP enabled for {movie_url}; cache: {}",
+                        cache_directory.display()
+                    );
+                    navigator.set_request_interceptor(Rc::new(interceptor));
+                }
+                Err(error) => {
+                    tracing::error!("Could not enable Seer2 virtual HTTP: {error}");
+                }
+            }
+        }
 
         if cfg!(feature = "external_video") && preferences.openh264_enabled() {
             #[cfg(feature = "external_video")]
