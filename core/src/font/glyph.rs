@@ -47,6 +47,7 @@ pub enum GlyphRenderData {
         info: BitmapInfo,
         tx: Twips,
         ty: Twips,
+        scale: f32,
     },
     AtlasGlyph(FontAtlasGlyph),
 }
@@ -56,11 +57,12 @@ impl GlyphRenderData {
         Self::Shape(shape_handle)
     }
 
-    pub fn from_bitmap(bitmap_info: BitmapInfo, tx: Twips, ty: Twips) -> Self {
+    pub fn from_bitmap(bitmap_info: BitmapInfo, tx: Twips, ty: Twips, scale: f32) -> Self {
         Self::Bitmap {
             info: bitmap_info,
             tx,
             ty,
+            scale,
         }
     }
 
@@ -123,7 +125,7 @@ impl GlyphShape {
                 })
                 .ok()
                 .cloned()
-                .map(|info| GlyphRenderData::from_bitmap(info, bitmap.tx, bitmap.ty)),
+                .map(|info| GlyphRenderData::from_bitmap(info, bitmap.tx, bitmap.ty, bitmap.scale)),
             GlyphShape::AtlasGlyph(atlas_glyph) => atlas_glyph
                 .atlas_handle(renderer)
                 .as_ref()
@@ -144,6 +146,9 @@ struct GlyphBitmap<'a> {
 
     /// Translation in y to be applied before rendering the glyph.
     ty: Twips,
+
+    /// Scale to be applied before rendering the glyph.
+    scale: f32,
 }
 
 impl<'a> std::fmt::Debug for GlyphBitmap<'a> {
@@ -157,12 +162,23 @@ impl<'a> std::fmt::Debug for GlyphBitmap<'a> {
 
 impl<'a> GlyphBitmap<'a> {
     pub fn new(bitmap: Bitmap<'a>, tx: Twips, ty: Twips, has_native_color: bool) -> Self {
+        Self::new_with_transform(bitmap, tx, ty, 1.0, has_native_color)
+    }
+
+    pub fn new_with_transform(
+        bitmap: Bitmap<'a>,
+        tx: Twips,
+        ty: Twips,
+        scale: f32,
+        has_native_color: bool,
+    ) -> Self {
         Self {
             bitmap: Cell::new(Some(bitmap)),
             handle: OnceCell::new(),
             has_native_color,
             tx,
             ty,
+            scale,
         }
     }
 
@@ -191,6 +207,7 @@ impl<'a> GlyphBitmap<'a> {
 pub struct Glyph {
     shape: GlyphShape,
     advance: Twips,
+    has_native_color: bool,
 
     // The character this glyph represents.
     character: char,
@@ -202,6 +219,7 @@ impl Glyph {
         Self {
             shape: GlyphShape::None,
             advance: Twips::ZERO,
+            has_native_color: false,
             character,
         }
     }
@@ -210,14 +228,25 @@ impl Glyph {
         Self {
             shape: GlyphShape::None,
             advance,
+            has_native_color: false,
             character,
         }
     }
 
     pub fn from_drawing(character: char, advance: Twips, drawing: Drawing) -> Self {
+        Self::from_drawing_with_native_color(character, advance, drawing, false)
+    }
+
+    pub(crate) fn from_drawing_with_native_color(
+        character: char,
+        advance: Twips,
+        drawing: Drawing,
+        has_native_color: bool,
+    ) -> Self {
         Self {
             shape: GlyphShape::Drawing(Box::new(drawing)),
             advance,
+            has_native_color,
             character,
         }
     }
@@ -226,6 +255,7 @@ impl Glyph {
         Self {
             advance: Twips::new(swf_glyph.advance.into()),
             shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::Glyph(swf_glyph)))),
+            has_native_color: false,
             character,
         }
     }
@@ -249,13 +279,32 @@ impl Glyph {
         has_native_color: bool,
     ) -> Self {
         Self {
-            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new(
+            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new(bitmap, tx, ty, has_native_color))),
+            advance,
+            has_native_color,
+            character,
+        }
+    }
+
+    pub(crate) fn from_bitmap_with_transform_and_native_color(
+        character: char,
+        bitmap: Bitmap<'static>,
+        advance: Twips,
+        tx: Twips,
+        ty: Twips,
+        scale: f32,
+        has_native_color: bool,
+    ) -> Self {
+        Self {
+            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new_with_transform(
                 bitmap,
                 tx,
                 ty,
+                scale,
                 has_native_color,
             ))),
             advance,
+            has_native_color,
             character,
         }
     }
@@ -264,6 +313,7 @@ impl Glyph {
         Self {
             shape: GlyphShape::AtlasGlyph(atlas_glyph),
             advance,
+            has_native_color: false,
             character,
         }
     }
@@ -299,10 +349,7 @@ impl Glyph {
     }
 
     pub fn has_native_color(&self) -> bool {
-        match &self.shape {
-            GlyphShape::Bitmap(bitmap) => bitmap.has_native_color,
-            _ => false,
-        }
+        self.has_native_color
     }
 
     pub fn renderable<'gc>(&self, context: &mut RenderContext<'_, 'gc>) -> bool {
@@ -322,9 +369,20 @@ impl Glyph {
                     .commands
                     .render_shape(shape_handle, context.transform_stack.transform());
             }
-            GlyphRenderData::Bitmap { info, tx, ty } => {
+            GlyphRenderData::Bitmap {
+                info,
+                tx,
+                ty,
+                scale,
+            } => {
                 context.transform_stack.push(&Transform {
-                    matrix: Matrix::translate(tx, ty),
+                    matrix: Matrix {
+                        a: scale,
+                        d: scale,
+                        tx,
+                        ty,
+                        ..Matrix::IDENTITY
+                    },
                     ..Default::default()
                 });
 
