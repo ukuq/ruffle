@@ -389,6 +389,10 @@ impl ActivePlayer {
                     "Noto Sans CJK".into(),
                     "Source Han Sans".into(),
                     "Microsoft JhengHei".into(),
+                    "Segoe UI Emoji".into(),
+                    "Segoe UI Symbol".into(),
+                    "Noto Color Emoji".into(),
+                    "Apple Color Emoji".into(),
                 ],
             );
             player_lock.set_default_font(
