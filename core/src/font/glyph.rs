@@ -104,6 +104,7 @@ impl GlyphShape {
 pub struct Glyph {
     shape: GlyphShape,
     advance: Twips,
+    has_native_color: bool,
 
     // The character this glyph represents.
     character: char,
@@ -115,6 +116,7 @@ impl Glyph {
         Self {
             shape: GlyphShape::None,
             advance: Twips::ZERO,
+            has_native_color: false,
             character,
         }
     }
@@ -123,6 +125,7 @@ impl Glyph {
         Self {
             shape: GlyphShape::None,
             advance,
+            has_native_color: false,
             character,
         }
     }
@@ -131,6 +134,7 @@ impl Glyph {
         Self {
             shape: GlyphShape::Drawing(Box::new(drawing)),
             advance,
+            has_native_color: false,
             character,
         }
     }
@@ -139,6 +143,7 @@ impl Glyph {
         Self {
             advance: Twips::new(swf_glyph.advance.into()),
             shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::Glyph(swf_glyph)))),
+            has_native_color: false,
             character,
         }
     }
@@ -147,6 +152,21 @@ impl Glyph {
         Self {
             shape: GlyphShape::AtlasGlyph(atlas_glyph),
             advance,
+            has_native_color: false,
+            character,
+        }
+    }
+
+    pub fn from_atlas_with_native_color(
+        character: char,
+        atlas_glyph: FontAtlasGlyph,
+        advance: Twips,
+        has_native_color: bool,
+    ) -> Self {
+        Self {
+            shape: GlyphShape::AtlasGlyph(atlas_glyph),
+            advance,
+            has_native_color,
             character,
         }
     }
@@ -178,6 +198,10 @@ impl Glyph {
             GlyphShape::AtlasGlyph(_) => false,
             GlyphShape::None => false,
         }
+    }
+
+    pub fn has_native_color(&self) -> bool {
+        self.has_native_color
     }
 
     pub fn renderable<'gc>(&self, context: &mut RenderContext<'_, 'gc>) -> bool {
