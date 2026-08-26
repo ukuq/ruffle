@@ -329,11 +329,19 @@ impl Glyph {
                 });
 
                 let region = info.full_region();
+                let mut transform = context.transform_stack.transform();
+                if transform.matrix.b == 0.0 && transform.matrix.c == 0.0 {
+                    transform.matrix.tx =
+                        Twips::from_pixels(transform.matrix.tx.to_pixels().round());
+                    transform.matrix.ty =
+                        Twips::from_pixels(transform.matrix.ty.to_pixels().round());
+                }
+
                 context.commands.render_bitmap(
                     info.handle,
-                    context.transform_stack.transform(),
+                    transform,
                     true,
-                    ruffle_render::bitmap::PixelSnapping::Auto,
+                    ruffle_render::bitmap::PixelSnapping::Never,
                     region,
                 );
 
