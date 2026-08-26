@@ -39,7 +39,7 @@ pub trait RenderTarget: Debug + 'static {
 
 #[derive(Debug)]
 pub struct SwapChainTarget {
-    window_surface: wgpu::Surface<'static>,
+    window_surface: Option<wgpu::Surface<'static>>,
     surface_config: wgpu::SurfaceConfiguration,
 }
 
@@ -70,6 +70,20 @@ impl SwapChainTarget {
         // adjust the colors. We prefer a non-sRGB surface format directly, but on platforms
         // that only expose sRGB surface formats we view the surface texture as its non-sRGB
         // counterpart so writes skip the linear->sRGB encode step.
+        let surface_config = Self::surface_config_for(&surface, adapter, width, height);
+        surface.configure(device, &surface_config);
+        Self {
+            surface_config,
+            window_surface: Some(surface),
+        }
+    }
+
+    fn surface_config_for(
+        surface: &wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        width: u32,
+        height: u32,
+    ) -> wgpu::SurfaceConfiguration {
         let capabilities = surface.get_capabilities(adapter);
         let format = capabilities
             .formats
@@ -86,7 +100,7 @@ impl SwapChainTarget {
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
 
         let linear_format = remove_srgb(format);
-        let surface_config = wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
@@ -100,12 +114,25 @@ impl SwapChainTarget {
             } else {
                 vec![format, linear_format]
             },
-        };
-        surface.configure(device, &surface_config);
-        Self {
-            surface_config,
-            window_surface: surface,
         }
+    }
+
+    pub fn release_surface(&mut self) {
+        self.window_surface = None;
+    }
+
+    pub fn recreate_surface(
+        &mut self,
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        (width, height): (u32, u32),
+        device: &wgpu::Device,
+    ) {
+        self.release_surface();
+        let surface_config = Self::surface_config_for(&surface, adapter, width, height);
+        surface.configure(device, &surface_config);
+        self.surface_config = surface_config;
+        self.window_surface = Some(surface);
     }
 }
 
@@ -115,7 +142,9 @@ impl RenderTarget for SwapChainTarget {
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.surface_config.width = width;
         self.surface_config.height = height;
-        self.window_surface.configure(device, &self.surface_config);
+        if let Some(surface) = self.window_surface.as_ref() {
+            surface.configure(device, &self.surface_config);
+        }
     }
 
     fn format(&self) -> wgpu::TextureFormat {
@@ -131,7 +160,8 @@ impl RenderTarget for SwapChainTarget {
     }
 
     fn get_next_texture(&mut self) -> Option<Self::Frame> {
-        let texture = match self.window_surface.get_current_texture() {
+        let surface = self.window_surface.as_ref()?;
+        let texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             // The texture is still usable - no reason to waste an already
             // acquired frame. Ideally the surface should also be reconfigured
