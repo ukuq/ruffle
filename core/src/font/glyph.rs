@@ -4,8 +4,11 @@ use crate::font::FontAtlasGlyph;
 use crate::prelude::*;
 use ruffle_render::backend::null::NullBitmapSource;
 use ruffle_render::backend::{RenderBackend, ShapeHandle};
+use ruffle_render::bitmap::{Bitmap, BitmapInfo};
+use ruffle_render::error::Error;
 use ruffle_render::transform::Transform;
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 enum SwfGlyphOrShape {
@@ -39,12 +42,27 @@ impl SwfGlyphOrShape {
 #[derive(Clone, Debug)]
 pub enum GlyphRenderData {
     Shape(ShapeHandle),
+    Bitmap {
+        info: BitmapInfo,
+        tx: Twips,
+        ty: Twips,
+        scale: f32,
+    },
     AtlasGlyph(FontAtlasGlyph),
 }
 
 impl GlyphRenderData {
     pub fn from_shape(shape_handle: ShapeHandle) -> Self {
         Self::Shape(shape_handle)
+    }
+
+    pub fn from_bitmap(bitmap_info: BitmapInfo, tx: Twips, ty: Twips, scale: f32) -> Self {
+        Self::Bitmap {
+            info: bitmap_info,
+            tx,
+            ty,
+            scale,
+        }
     }
 
     pub fn from_atlas(atlas_glyph: FontAtlasGlyph) -> Self {
@@ -56,6 +74,7 @@ impl GlyphRenderData {
 enum GlyphShape {
     Swf(Box<RefCell<SwfGlyphOrShape>>),
     Drawing(Box<Drawing>),
+    Bitmap(Rc<GlyphBitmap<'static>>),
     AtlasGlyph(FontAtlasGlyph),
     None,
 }
@@ -70,6 +89,10 @@ impl GlyphShape {
                     && ruffle_render::shape_utils::shape_hit_test(shape, point, local_matrix)
             }
             GlyphShape::Drawing(drawing) => drawing.hit_test(point, local_matrix),
+            GlyphShape::Bitmap(_) => {
+                // TODO Implement this.
+                true
+            }
             GlyphShape::AtlasGlyph(_) => {
                 // TODO Implement this.
                 true
@@ -91,12 +114,91 @@ impl GlyphShape {
             GlyphShape::Drawing(drawing) => drawing
                 .register_or_replace(renderer)
                 .map(GlyphRenderData::from_shape),
+            GlyphShape::Bitmap(bitmap) => bitmap
+                .get_bitmap_info_or_register(renderer)
+                .as_ref()
+                .inspect_err(|err| {
+                    tracing::error!(
+                        "Failed to register glyph as a bitmap: {err}, glyphs will be missing"
+                    )
+                })
+                .ok()
+                .cloned()
+                .map(|info| GlyphRenderData::from_bitmap(info, bitmap.tx, bitmap.ty, bitmap.scale)),
             GlyphShape::AtlasGlyph(atlas_glyph) => atlas_glyph
                 .atlas_handle(renderer)
                 .as_ref()
                 .map(|_| GlyphRenderData::from_atlas(atlas_glyph.clone())),
             GlyphShape::None => None,
         }
+    }
+}
+
+/// A Bitmap that can be registered to a RenderBackend.
+struct GlyphBitmap<'a> {
+    bitmap: Cell<Option<Bitmap<'a>>>,
+    handle: OnceCell<Result<BitmapInfo, Error>>,
+    has_native_color: bool,
+
+    /// Translation in x to be applied before rendering the glyph.
+    tx: Twips,
+
+    /// Translation in y to be applied before rendering the glyph.
+    ty: Twips,
+
+    /// Scale to be applied before rendering the glyph.
+    scale: f32,
+}
+
+impl<'a> std::fmt::Debug for GlyphBitmap<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlyphBitmap")
+            .field("handle", &self.handle)
+            .field("has_native_color", &self.has_native_color)
+            .finish()
+    }
+}
+
+impl<'a> GlyphBitmap<'a> {
+    pub fn new(bitmap: Bitmap<'a>, tx: Twips, ty: Twips, has_native_color: bool) -> Self {
+        Self::new_with_transform(bitmap, tx, ty, 1.0, has_native_color)
+    }
+
+    pub fn new_with_transform(
+        bitmap: Bitmap<'a>,
+        tx: Twips,
+        ty: Twips,
+        scale: f32,
+        has_native_color: bool,
+    ) -> Self {
+        Self {
+            bitmap: Cell::new(Some(bitmap)),
+            handle: OnceCell::new(),
+            has_native_color,
+            tx,
+            ty,
+            scale,
+        }
+    }
+
+    pub fn get_bitmap_info_or_register(
+        &self,
+        renderer: &mut dyn RenderBackend,
+    ) -> &Result<BitmapInfo, Error> {
+        self.handle.get_or_init(|| {
+            let bitmap = self
+                .bitmap
+                .take()
+                .expect("Bitmap should be available before registering");
+            let width = bitmap.width();
+            let height = bitmap.height();
+            let handle = renderer.register_bitmap(bitmap)?;
+            Ok(BitmapInfo {
+                handle,
+                width,
+                height,
+            })
+        })
     }
 }
 
@@ -131,10 +233,19 @@ impl Glyph {
     }
 
     pub fn from_drawing(character: char, advance: Twips, drawing: Drawing) -> Self {
+        Self::from_drawing_with_native_color(character, advance, drawing, false)
+    }
+
+    pub(crate) fn from_drawing_with_native_color(
+        character: char,
+        advance: Twips,
+        drawing: Drawing,
+        has_native_color: bool,
+    ) -> Self {
         Self {
             shape: GlyphShape::Drawing(Box::new(drawing)),
             advance,
-            has_native_color: false,
+            has_native_color,
             character,
         }
     }
@@ -144,6 +255,55 @@ impl Glyph {
             advance: Twips::new(swf_glyph.advance.into()),
             shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::Glyph(swf_glyph)))),
             has_native_color: false,
+            character,
+        }
+    }
+
+    pub fn from_bitmap(
+        character: char,
+        bitmap: Bitmap<'static>,
+        advance: Twips,
+        tx: Twips,
+        ty: Twips,
+    ) -> Self {
+        Self::from_bitmap_with_native_color(character, bitmap, advance, tx, ty, false)
+    }
+
+    pub fn from_bitmap_with_native_color(
+        character: char,
+        bitmap: Bitmap<'static>,
+        advance: Twips,
+        tx: Twips,
+        ty: Twips,
+        has_native_color: bool,
+    ) -> Self {
+        Self {
+            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new(bitmap, tx, ty, has_native_color))),
+            advance,
+            has_native_color,
+            character,
+        }
+    }
+
+    pub(crate) fn from_bitmap_with_transform_and_native_color(
+        character: char,
+        bitmap: Bitmap<'static>,
+        advance: Twips,
+        tx: Twips,
+        ty: Twips,
+        scale: f32,
+        has_native_color: bool,
+    ) -> Self {
+        Self {
+            shape: GlyphShape::Bitmap(Rc::new(GlyphBitmap::new_with_transform(
+                bitmap,
+                tx,
+                ty,
+                scale,
+                has_native_color,
+            ))),
+            advance,
+            has_native_color,
             character,
         }
     }
@@ -195,6 +355,7 @@ impl Glyph {
         match self.shape {
             GlyphShape::Swf(_) => true,
             GlyphShape::Drawing(_) => true,
+            GlyphShape::Bitmap(_) => false,
             GlyphShape::AtlasGlyph(_) => false,
             GlyphShape::None => false,
         }
@@ -220,6 +381,42 @@ impl Glyph {
                 context
                     .commands
                     .render_shape(shape_handle, context.transform_stack.transform());
+            }
+            GlyphRenderData::Bitmap {
+                info,
+                tx,
+                ty,
+                scale,
+            } => {
+                context.transform_stack.push(&Transform {
+                    matrix: Matrix {
+                        a: scale,
+                        d: scale,
+                        tx,
+                        ty,
+                        ..Matrix::IDENTITY
+                    },
+                    ..Default::default()
+                });
+
+                let region = info.full_region();
+                let mut transform = context.transform_stack.transform();
+                if transform.matrix.b == 0.0 && transform.matrix.c == 0.0 {
+                    transform.matrix.tx =
+                        Twips::from_pixels(transform.matrix.tx.to_pixels().round());
+                    transform.matrix.ty =
+                        Twips::from_pixels(transform.matrix.ty.to_pixels().round());
+                }
+
+                context.commands.render_bitmap(
+                    info.handle,
+                    transform,
+                    true,
+                    ruffle_render::bitmap::PixelSnapping::Never,
+                    region,
+                );
+
+                context.transform_stack.pop();
             }
             GlyphRenderData::AtlasGlyph(atlas_glyph) => {
                 let handle = atlas_glyph.atlas_handle(context.renderer);
