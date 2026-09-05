@@ -1,0 +1,15 @@
+network-monitor-title = 网络监视器
+network-monitor-clear = 清空
+network-monitor-filter = 筛选
+network-monitor-pending = 进行中
+network-monitor-failed = 失败
+network-monitor-method = 方法
+network-monitor-status = 状态
+network-monitor-source = 来源
+network-monitor-time = 耗时
+network-monitor-size = 大小
+network-monitor-url = URL
+network-monitor-started = 开始时间
+network-monitor-duration = 耗时
+network-monitor-upstream = 上游地址
+network-monitor-error = 错误

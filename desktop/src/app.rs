@@ -1,6 +1,6 @@
 use crate::custom_event::{OpenType, RuffleEvent};
 use crate::diagnostics::{ProcessDiagnosticsSampler, ProcessMetrics};
-use crate::gui::{GuiController, MENU_HEIGHT};
+use crate::gui::{GuiController, MENU_HEIGHT, NetworkMonitorWindow};
 use crate::player::{LaunchOptions, PlayerController};
 use crate::preferences::GlobalPreferences;
 use crate::util::{
@@ -521,6 +521,7 @@ fn bytes_to_mb(bytes: u64) -> f64 {
 
 pub struct App {
     main_window: Option<MainWindow>,
+    network_monitor_window: Option<NetworkMonitorWindow>,
     runtime: Option<tokio::runtime::Runtime>,
     gilrs: Option<Gilrs>,
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
@@ -554,6 +555,7 @@ impl App {
         Ok((
             Self {
                 main_window: None,
+                network_monitor_window: None,
                 runtime: Some(runtime),
                 gilrs,
                 event_loop_proxy,
@@ -750,6 +752,59 @@ impl ApplicationHandler<RuffleEvent> for App {
                 main_window.gui.export_bundle();
             }
 
+            (Some(main_window), RuffleEvent::OpenNetworkMonitor) => {
+                if let Some(window) = &self.network_monitor_window {
+                    window.focus();
+                } else {
+                    match NetworkMonitorWindow::new(
+                        event_loop,
+                        main_window.gui.descriptors().clone(),
+                        &self.font_database,
+                        main_window.preferences.language(),
+                        main_window.preferences.theme_preference(),
+                    ) {
+                        Ok(window) => self.network_monitor_window = Some(window),
+                        Err(error) => {
+                            tracing::error!("Unable to open the network monitor: {error:#}")
+                        }
+                    }
+                }
+            }
+
+            (Some(main_window), RuffleEvent::BrowseSeer2ProxyRoot) => {
+                let event_loop = main_window.event_loop_proxy.clone();
+                let picker = main_window.gui.file_picker();
+                tokio::spawn(async move {
+                    if let Some(directory) = picker.pick_seer2_proxy_directory().await {
+                        let _ =
+                            event_loop.send_event(RuffleEvent::SetSeer2ProxyRoot(Some(directory)));
+                    }
+                });
+            }
+
+            (Some(main_window), RuffleEvent::SetSeer2ProxyRoot(proxy_root)) => {
+                main_window.movie_size = None;
+                main_window.last_player_viewport = None;
+                if let Err(error) = main_window.preferences.write_preferences(|writer| {
+                    writer.set_seer2_proxy_root(proxy_root.clone());
+                }) {
+                    tracing::warn!("Unable to persist the Seer2 proxy directory: {error:#}");
+                }
+                if main_window
+                    .gui
+                    .set_seer2_proxy_root(&mut main_window.player, proxy_root.clone())
+                {
+                    if let Some(proxy_root) = proxy_root {
+                        tracing::info!(
+                            "Enabled the Seer2 local resource proxy at {}",
+                            proxy_root.display()
+                        );
+                    } else {
+                        tracing::info!("Disabled the Seer2 local resource proxy");
+                    }
+                }
+            }
+
             (Some(main_window), RuffleEvent::EnterFullScreen) => {
                 main_window.set_player_fullscreen(true);
             }
@@ -796,12 +851,27 @@ impl ApplicationHandler<RuffleEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         enter_runtime!(self);
 
-        if let Some(main_window) = &mut self.main_window {
+        if self
+            .network_monitor_window
+            .as_ref()
+            .is_some_and(|window| window.id() == window_id)
+        {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.network_monitor_window = None;
+            } else if let Some(window) = &mut self.network_monitor_window {
+                window.window_event(&event);
+            }
+            return;
+        }
+
+        if let Some(main_window) = &mut self.main_window
+            && main_window.gui.window().id() == window_id
+        {
             main_window.window_event(event_loop, event);
         }
     }
@@ -809,17 +879,20 @@ impl ApplicationHandler<RuffleEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         enter_runtime!(self);
 
+        let mut next_wake = None;
         if let Some(main_window) = &mut self.main_window {
             main_window.about_to_wait(self.gilrs.as_mut());
+            next_wake = main_window.next_frame_time;
+        }
+        if let Some(window) = &mut self.network_monitor_window {
+            let monitor_refresh = window.about_to_wait();
+            next_wake = Some(next_wake.map_or(monitor_refresh, |wake| wake.min(monitor_refresh)));
+        }
 
-            // The event loop is finished; let's find out how long we need to wait for.
-            // We don't need to worry about earlier update requests, as it's the
-            // only place where we're setting control flow, and events cancel wait.
-            // Note: the control flow might be set to `ControlFlow::WaitUntil` with a
-            // timestamp in the past! Take that into consideration when changing this code.
-            if let Some(next_frame_time) = main_window.next_frame_time {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next_frame_time));
-            }
+        // The event loop is finished; choose the earliest player frame or
+        // network-monitor refresh. Any incoming event cancels the wait.
+        if let Some(next_wake) = next_wake {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
         }
     }
 
@@ -827,6 +900,7 @@ impl ApplicationHandler<RuffleEvent> for App {
         // `MainWindow` needs a tokio context to properly drop.
         {
             enter_runtime!(self);
+            let _ = self.network_monitor_window.take();
             let _ = self.main_window.take();
         }
 

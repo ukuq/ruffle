@@ -102,7 +102,7 @@ impl From<&GlobalPreferences> for LaunchOptions {
             save_directory: value.cli.save_directory.clone(),
             cache_directory: value.cli.cache_directory.clone(),
             seer2_virtual_http: value.cli.seer2_virtual_http,
-            seer2_proxy_root: value.cli.seer2_proxy_root.clone(),
+            seer2_proxy_root: value.seer2_proxy_root(),
             seer2_cache_directory: value.cli.seer2_cache_directory.clone(),
             filesystem_access_mode: value.cli.filesystem_access_mode,
             socket_allowed: HashSet::from_iter(value.cli.socket_allow.iter().cloned()),

@@ -2,6 +2,7 @@
 
 use ruffle_core::events::PlayerNotification;
 use ruffle_frontend_utils::content::ContentDescriptor;
+use std::path::PathBuf;
 
 use crate::gui::DialogDescriptor;
 use crate::player::{LaunchOptions, PlayerRunnable};
@@ -48,4 +49,13 @@ pub enum RuffleEvent {
 
     /// Export Ruffle Bundle from currently playing content and open save dialog.
     ExportBundle,
+
+    /// Open or focus the standalone Seer2 network monitor window.
+    OpenNetworkMonitor,
+
+    /// Ask the user to select a local Seer2 resource proxy directory.
+    BrowseSeer2ProxyRoot,
+
+    /// Enable or disable the local Seer2 resource proxy, then reload the movie.
+    SetSeer2ProxyRoot(Option<PathBuf>),
 }

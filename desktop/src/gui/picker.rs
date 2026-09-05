@@ -103,6 +103,13 @@ impl FilePicker {
         Some(self.show_dialog(dialog, |d| d.pick_folder())?.await?.into())
     }
 
+    pub async fn pick_seer2_proxy_directory(&self) -> Option<PathBuf> {
+        let locale = &self.data.preferences.language();
+        let dialog = AsyncFileDialog::new().set_title(text(locale, "seer2-proxy-picker-title"));
+
+        Some(self.show_dialog(dialog, |d| d.pick_folder())?.await?.into())
+    }
+
     /// Pick a directory and content to play.
     ///
     /// This can return:

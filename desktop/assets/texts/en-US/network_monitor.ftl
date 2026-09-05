@@ -1,0 +1,15 @@
+network-monitor-title = Network Monitor
+network-monitor-clear = Clear
+network-monitor-filter = Filter
+network-monitor-pending = Pending
+network-monitor-failed = Failed
+network-monitor-method = Method
+network-monitor-status = Status
+network-monitor-source = Source
+network-monitor-time = Time
+network-monitor-size = Size
+network-monitor-url = URL
+network-monitor-started = Started
+network-monitor-duration = Duration
+network-monitor-upstream = Upstream
+network-monitor-error = Error
