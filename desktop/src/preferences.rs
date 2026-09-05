@@ -15,6 +15,7 @@ use ruffle_frontend_utils::bookmarks::{Bookmarks, BookmarksWriter, read_bookmark
 use ruffle_frontend_utils::parse::DocumentHolder;
 use ruffle_frontend_utils::recents::{Recents, RecentsWriter, read_recents};
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use sys_locale::get_locale;
 use tokio::sync::broadcast;
@@ -237,6 +238,16 @@ impl GlobalPreferences {
             .device_font_renderer
     }
 
+    pub fn seer2_proxy_root(&self) -> Option<PathBuf> {
+        self.cli.seer2_proxy_root.clone().or_else(|| {
+            self.preferences
+                .lock()
+                .expect("Non-poisoned preferences")
+                .seer2_proxy_root
+                .clone()
+        })
+    }
+
     pub fn recents<R>(&self, fun: impl FnOnce(&Recents) -> R) -> R {
         fun(&self.recents.lock().expect("Recents is not reentrant"))
     }
@@ -296,6 +307,7 @@ pub struct SavedGlobalPreferences {
     pub open_url_mode: OpenUrlMode,
     pub ime_enabled: Option<bool>,
     pub device_font_renderer: Option<DeviceFontRenderer>,
+    pub seer2_proxy_root: Option<PathBuf>,
 }
 
 impl Default for SavedGlobalPreferences {
@@ -321,6 +333,7 @@ impl Default for SavedGlobalPreferences {
             open_url_mode: Default::default(),
             ime_enabled: None,
             device_font_renderer: None,
+            seer2_proxy_root: None,
         }
     }
 }

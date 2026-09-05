@@ -6,6 +6,7 @@ use crate::preferences::storage::StorageBackend;
 use crate::preferences::{GlobalPreferencesWatchers, SavedGlobalPreferences};
 use ruffle_frontend_utils::parse::DocumentHolder;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
+use std::path::PathBuf;
 use toml_edit::value;
 use unic_langid::LanguageIdentifier;
 
@@ -152,6 +153,18 @@ impl<'a> PreferencesWriter<'a> {
                 toml_document.remove("device_font_renderer");
             }
             values.device_font_renderer = device_font_renderer;
+        });
+    }
+
+    pub fn set_seer2_proxy_root(&mut self, proxy_root: Option<PathBuf>) {
+        self.0.edit(|values, toml_document| {
+            if let Some(proxy_root) = &proxy_root {
+                toml_document["seer2_proxy_root"] =
+                    value(proxy_root.to_string_lossy().into_owned());
+            } else {
+                toml_document.remove("seer2_proxy_root");
+            }
+            values.seer2_proxy_root = proxy_root;
         });
     }
 }
@@ -385,6 +398,20 @@ mod tests {
         test(
             "device_font_renderer = \"freetype\"",
             |writer| writer.set_device_font_renderer(None),
+            "",
+        );
+    }
+
+    #[test]
+    fn set_seer2_proxy_root() {
+        test(
+            "",
+            |writer| writer.set_seer2_proxy_root(Some(PathBuf::from("D:/seer2-proxy"))),
+            "seer2_proxy_root = \"D:/seer2-proxy\"\n",
+        );
+        test(
+            "seer2_proxy_root = \"D:/seer2-proxy\"",
+            |writer| writer.set_seer2_proxy_root(None),
             "",
         );
     }

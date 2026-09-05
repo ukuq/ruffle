@@ -4,6 +4,7 @@ pub mod dialogs;
 mod locale;
 mod menu_bar;
 mod movie;
+mod network_monitor;
 mod picker;
 mod theme;
 mod widgets;
@@ -16,6 +17,7 @@ pub use locale::optional_text;
 pub use locale::text;
 pub use locale::text_with_args;
 pub use movie::MovieView;
+pub(crate) use network_monitor::NetworkMonitorWindow;
 pub use picker::FilePicker;
 use ruffle_frontend_utils::content::ContentDescriptor;
 pub use theme::ThemePreference;
@@ -178,5 +180,13 @@ impl RuffleGui {
             .recreate_open_dialog(opt, Some(content_descriptor), self.event_loop.clone());
 
         player.set_volume(self.dialogs.volume_controls.get_volume());
+    }
+
+    fn currently_opened(&self) -> Option<(ContentDescriptor, LaunchOptions)> {
+        self.menu_bar.currently_opened.clone()
+    }
+
+    fn set_default_seer2_proxy_root(&mut self, proxy_root: Option<std::path::PathBuf>) {
+        self.menu_bar.default_launch_options.seer2_proxy_root = proxy_root;
     }
 }
