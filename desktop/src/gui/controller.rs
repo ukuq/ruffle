@@ -20,7 +20,7 @@ use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -323,6 +323,21 @@ impl GuiController {
                 .get()
                 .expect("Player must exist after being created."),
         );
+    }
+
+    pub fn set_seer2_proxy_root(
+        &mut self,
+        player: &mut PlayerController,
+        proxy_root: Option<PathBuf>,
+    ) -> bool {
+        self.gui.set_default_seer2_proxy_root(proxy_root.clone());
+        let Some((content_descriptor, mut options)) = self.gui.currently_opened() else {
+            return false;
+        };
+
+        options.seer2_proxy_root = proxy_root;
+        self.create_movie(player, options, content_descriptor);
+        true
     }
 
     pub fn height_offset(&self) -> f64 {
@@ -704,7 +719,7 @@ fn try_wgpu_backend(backend: wgpu::Backends, window: Arc<Window>) -> Option<wgpu
 }
 
 // Load fallback fonts
-fn load_system_fonts(
+pub(crate) fn load_system_fonts(
     font_database: &Database,
     locale: unic_langid::LanguageIdentifier,
 ) -> egui::FontDefinitions {

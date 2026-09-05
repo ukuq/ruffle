@@ -4,22 +4,31 @@ use crate::gui::{DebugMessage, text};
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
 use egui::{Button, Key, KeyboardShortcut, Modifiers, Widget};
+use rfd::{MessageButtons, MessageDialog, MessageLevel};
 use ruffle_core::config::Letterbox;
 use ruffle_core::focus_tracker::DisplayObject;
 use ruffle_core::{Player, StageScaleMode};
+use ruffle_frontend_utils::backends::navigator::{
+    clear_seer2_file_cache, reset_seer2_version_manifest, seer2_cache_metrics,
+};
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_frontend_utils::recents::Recent;
 use ruffle_render::quality::StageQuality;
 use unic_langid::LanguageIdentifier;
+use url::Url;
 use winit::event_loop::EventLoopProxy;
+
+const SEER2_GAME_HOME_URL: &str = "http://seer2.client/seer2/Client.swf";
 
 pub struct MenuBar {
     event_loop: EventLoopProxy<RuffleEvent>,
-    default_launch_options: LaunchOptions,
+    pub(super) default_launch_options: LaunchOptions,
     preferences: GlobalPreferences,
 
     cached_recents: Option<Vec<Recent>>,
     pub currently_opened: Option<(ContentDescriptor, LaunchOptions)>,
+    confirm_clear_file_cache: bool,
+    focus_clear_file_cache_no: bool,
 }
 
 impl MenuBar {
@@ -43,6 +52,8 @@ impl MenuBar {
             default_launch_options,
             cached_recents: None,
             currently_opened: None,
+            confirm_clear_file_cache: false,
+            focus_clear_file_cache_no: false,
             preferences,
         }
     }
@@ -175,6 +186,16 @@ impl MenuBar {
                                 player.debug_ui().queue_message(DebugMessage::SearchForDisplayObject);
                             }
                         }
+                        ui.separator();
+                        if Button::new(text(locale, "debug-menu-network-monitor"))
+                            .ui(ui)
+                            .clicked()
+                        {
+                            ui.close();
+                            let _ = self
+                                .event_loop
+                                .send_event(RuffleEvent::OpenNetworkMonitor);
+                        }
                     });
                 });
                 ui.menu_button(text(locale, "help-menu"), |ui| {
@@ -196,8 +217,171 @@ impl MenuBar {
                         ui.close();
                     }
                 });
+                self.cache_metrics_menu(locale, ui);
+                self.seer2_proxy_button(locale, ui);
             });
         });
+        self.show_clear_file_cache_confirmation(locale, egui_ui.ctx());
+    }
+
+    fn cache_metrics_menu(&mut self, locale: &LanguageIdentifier, ui: &mut egui::Ui) {
+        let metrics = seer2_cache_metrics();
+        let label = format!(
+            "{} hit:{} expired:{} fetch:{} cached:{} checked:{} unchanged:{} changed:{} proxy:{}",
+            text(locale, "cache-metrics-menu"),
+            metrics.hit,
+            metrics.expired,
+            metrics.fetch,
+            metrics.cached,
+            metrics.checked,
+            metrics.unchanged,
+            metrics.changed,
+            metrics.proxy,
+        );
+        ui.menu_button(label, |ui| {
+            if ui
+                .button(text(locale, "cache-metrics-refresh-manifest"))
+                .on_hover_text(text(locale, "cache-metrics-refresh-manifest-tooltip"))
+                .clicked()
+            {
+                reset_seer2_version_manifest();
+                tracing::info!("Reset the cached Seer2 version root and Bloom manifest");
+                ui.close();
+            }
+            if ui
+                .button(text(locale, "cache-metrics-clear-files"))
+                .on_hover_text(text(locale, "cache-metrics-clear-files-tooltip"))
+                .clicked()
+            {
+                ui.close();
+                self.confirm_clear_file_cache = true;
+                self.focus_clear_file_cache_no = true;
+            }
+        });
+    }
+
+    fn seer2_proxy_button(&self, locale: &LanguageIdentifier, ui: &mut egui::Ui) {
+        let options = self
+            .currently_opened
+            .as_ref()
+            .map(|(_, options)| options)
+            .unwrap_or(&self.default_launch_options);
+        let proxy_root = options.seer2_proxy_root.as_ref();
+        let label = if let Some(proxy_root) = proxy_root {
+            format!(
+                "✅{}({})",
+                text(locale, "seer2-proxy-label"),
+                proxy_root.display()
+            )
+        } else {
+            format!("❌{}", text(locale, "seer2-proxy-label"))
+        };
+        let tooltip = if proxy_root.is_some() {
+            text(locale, "seer2-proxy-disable-tooltip")
+        } else {
+            text(locale, "seer2-proxy-enable-tooltip")
+        };
+        let can_change = self.currently_opened.is_some() && options.seer2_virtual_http;
+
+        if ui
+            .add_enabled(can_change, Button::new(label))
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            ui.close();
+            let event = if proxy_root.is_some() {
+                RuffleEvent::SetSeer2ProxyRoot(None)
+            } else {
+                RuffleEvent::BrowseSeer2ProxyRoot
+            };
+            let _ = self.event_loop.send_event(event);
+        }
+    }
+
+    fn show_clear_file_cache_confirmation(
+        &mut self,
+        locale: &LanguageIdentifier,
+        context: &egui::Context,
+    ) {
+        if !self.confirm_clear_file_cache {
+            return;
+        }
+
+        let request_no_focus = std::mem::take(&mut self.focus_clear_file_cache_no);
+        let mut keep_open = true;
+        let mut confirmed = false;
+        let mut rejected = false;
+        egui::Window::new(text(locale, "cache-metrics-confirm-title"))
+            .open(&mut keep_open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label(text(locale, "cache-metrics-confirm-body"));
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let no = ui.button(text(locale, "cache-metrics-confirm-no"));
+                    if request_no_focus {
+                        no.request_focus();
+                    }
+                    rejected = no.clicked();
+                    confirmed = ui
+                        .button(text(locale, "cache-metrics-confirm-yes"))
+                        .clicked();
+                });
+            });
+
+        rejected |= context.input(|input| input.key_pressed(Key::Escape));
+        if confirmed {
+            self.confirm_clear_file_cache = false;
+            self.clear_file_cache(locale);
+        } else if rejected || !keep_open {
+            self.confirm_clear_file_cache = false;
+        }
+    }
+
+    fn clear_file_cache(&self, locale: &LanguageIdentifier) {
+        let options = self
+            .currently_opened
+            .as_ref()
+            .map(|(_, options)| options)
+            .unwrap_or(&self.default_launch_options);
+        let directory = options
+            .seer2_cache_directory
+            .clone()
+            .unwrap_or_else(|| options.cache_directory.join("seer2"));
+        match clear_seer2_file_cache(&directory) {
+            Ok(result) if result.failed_files == 0 => tracing::info!(
+                "Cleared {} Seer2 file-cache entries ({} bytes) from {}",
+                result.removed_files,
+                result.removed_bytes,
+                directory.display()
+            ),
+            Ok(result) => {
+                let error = format!(
+                    "Removed {} cache files, but {} files could not be removed.",
+                    result.removed_files, result.failed_files
+                );
+                tracing::warn!("{error}");
+                self.show_cache_error(locale, &error);
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Failed to clear Seer2 file cache {}: {error}",
+                    directory.display()
+                );
+                self.show_cache_error(locale, &error.to_string());
+            }
+        }
+    }
+
+    fn show_cache_error(&self, locale: &LanguageIdentifier, error: &str) {
+        MessageDialog::new()
+            .set_level(MessageLevel::Error)
+            .set_title(text(locale, "cache-metrics-error-title"))
+            .set_description(error)
+            .set_buttons(MessageButtons::Ok)
+            .show();
     }
 
     fn file_menu(
@@ -208,6 +392,15 @@ impl MenuBar {
         player_exists: bool,
     ) {
         ui.menu_button(text(locale, "file-menu"), |ui| {
+            if Button::new(text(locale, "file-menu-game-home"))
+                .ui(ui)
+                .clicked()
+            {
+                ui.close();
+                self.open_game_home();
+            }
+            ui.separator();
+
             if Button::new(text(locale, "file-menu-open-file"))
                 .shortcut_text(ui.ctx().format_shortcut(&Self::SHORTCUT_OPEN))
                 .ui(ui)
@@ -499,6 +692,16 @@ impl MenuBar {
         let _ = self.event_loop.send_event(RuffleEvent::BrowseAndOpen(
             Box::new(self.default_launch_options.clone()),
             open_type,
+        ));
+    }
+
+    fn open_game_home(&self) {
+        let mut options = self.default_launch_options.clone();
+        options.seer2_virtual_http = true;
+        let url = Url::parse(SEER2_GAME_HOME_URL).expect("Seer2 game home URL should be valid");
+        let _ = self.event_loop.send_event(RuffleEvent::Open(
+            ContentDescriptor::new_remote(url),
+            Box::new(options),
         ));
     }
 

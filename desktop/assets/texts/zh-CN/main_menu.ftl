@@ -9,6 +9,7 @@
 # This is because some languages may use different wording for one or the other, especially with things like capitalisation.
 
 file-menu = 文件
+file-menu-game-home = 游戏主页
 file-menu-open-file = 打开文件...
 file-menu-open-directory = 打开文件夹...
 file-menu-open-advanced = 打开(高级)...
@@ -30,6 +31,20 @@ help-menu-report-a-bug = 反馈问题...
 help-menu-sponsor-development = 赞助项目...
 help-menu-translate-ruffle = 翻译 Ruffle...
 help-menu-about = 关于 Ruffle
+cache-metrics-menu = 缓存
+cache-metrics-refresh-manifest = 刷新版本清单
+cache-metrics-refresh-manifest-tooltip = 清除内存中的版本根地址和 Bloom 清单，下次请求时重新获取
+cache-metrics-clear-files = 清空缓存(文件缓存)⚠️
+cache-metrics-clear-files-tooltip = 删除已下载的赛尔号加密资源缓存
+cache-metrics-confirm-title = 操作确认
+cache-metrics-confirm-body = 清空文件缓存会影响性能，后续资源需要重新下载，是否继续？
+cache-metrics-confirm-yes = 是
+cache-metrics-confirm-no = 否
+cache-metrics-error-title = 操作失败
+seer2-proxy-label = 本地代理
+seer2-proxy-enable-tooltip = 选择本地资源目录；命中时优先于文件缓存和网络请求
+seer2-proxy-disable-tooltip = 点击停用本地资源代理并重新加载游戏
+seer2-proxy-picker-title = 选择本地资源代理目录（目录内应包含 seer2 文件夹）
 bookmarks-menu = 书签
 bookmarks-menu-add = 添加...
 bookmarks-menu-manage = 管理书签...
@@ -40,5 +55,6 @@ debug-menu-open-movie = 查看影片
 debug-menu-open-movie-list = 显示已知影片
 debug-menu-open-domain-list = 显示域
 debug-menu-search-display-objects = 搜索显示对象...
+debug-menu-network-monitor = 网络监视器
 view-menu = 查看
 view-menu-fullscreen = 全屏
