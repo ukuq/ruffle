@@ -345,7 +345,7 @@ impl ActivePlayer {
                 DesktopUiBackend::new(
                     window.clone(),
                     event_loop.clone(),
-                    font_database,
+                    font_database.clone(),
                     preferences,
                     file_picker,
                 )
@@ -394,91 +394,109 @@ impl ActivePlayer {
 
             player_lock.set_default_font(
                 DefaultFont::Serif,
-                vec![
-                    "Times New Roman".into(),
-                    "Tinos".into(),
-                    "Liberation Serif".into(),
-                    "DejaVu Serif".into(),
-                    "SimSun".into(),
-                    "NSimSun".into(),
-                    "Noto Serif CJK SC".into(),
-                    "Source Han Serif SC".into(),
-                    "Microsoft YaHei".into(),
-                    "Microsoft JhengHei".into(),
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "Times New Roman".into(),
+                        "Tinos".into(),
+                        "Liberation Serif".into(),
+                        "DejaVu Serif".into(),
+                        "SimSun".into(),
+                        "NSimSun".into(),
+                        "Noto Serif CJK SC".into(),
+                        "Source Han Serif SC".into(),
+                        "Microsoft YaHei".into(),
+                        "Microsoft JhengHei".into(),
+                    ],
+                ),
             );
             player_lock.set_default_font(
                 DefaultFont::Sans,
-                vec![
-                    "Arial".into(),
-                    "Arimo".into(),
-                    "Liberation Sans".into(),
-                    "DejaVu Sans".into(),
-                    "Microsoft YaHei".into(),
-                    "Microsoft YaHei UI".into(),
-                    "SimHei".into(),
-                    "SimSun".into(),
-                    "Noto Sans CJK SC".into(),
-                    "Source Han Sans SC".into(),
-                    "Noto Sans CJK".into(),
-                    "Source Han Sans".into(),
-                    "Microsoft JhengHei".into(),
-                    "Segoe UI Emoji".into(),
-                    "Segoe UI Symbol".into(),
-                    "Noto Color Emoji".into(),
-                    "Apple Color Emoji".into(),
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "Arial".into(),
+                        "Arimo".into(),
+                        "Liberation Sans".into(),
+                        "DejaVu Sans".into(),
+                        "Microsoft YaHei".into(),
+                        "Microsoft YaHei UI".into(),
+                        "SimHei".into(),
+                        "SimSun".into(),
+                        "Noto Sans CJK SC".into(),
+                        "Source Han Sans SC".into(),
+                        "Noto Sans CJK".into(),
+                        "Source Han Sans".into(),
+                        "Microsoft JhengHei".into(),
+                        "Segoe UI Emoji".into(),
+                        "Segoe UI Symbol".into(),
+                        "Noto Color Emoji".into(),
+                        "Apple Color Emoji".into(),
+                    ],
+                ),
             );
             player_lock.set_default_font(
                 DefaultFont::Typewriter,
-                vec![
-                    "Courier New".into(),
-                    "Cousine".into(),
-                    "Liberation Mono".into(),
-                    "DejaVu Sans Mono".into(),
-                    "NSimSun".into(),
-                    "SimSun".into(),
-                    "DengXian".into(),
-                    "Noto Sans Mono CJK SC".into(),
-                    "Noto Sans CJK SC".into(),
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "Courier New".into(),
+                        "Cousine".into(),
+                        "Liberation Mono".into(),
+                        "DejaVu Sans Mono".into(),
+                        "NSimSun".into(),
+                        "SimSun".into(),
+                        "DengXian".into(),
+                        "Noto Sans Mono CJK SC".into(),
+                        "Noto Sans CJK SC".into(),
+                    ],
+                ),
             );
             player_lock.set_default_font(
                 DefaultFont::JapaneseGothic,
-                vec![
-                    "ヒラギノ角ゴ Pro W3".into(), // Mac with Japanese environment
-                    "MS UI Gothic".into(),        // Windows
-                    "Noto Sans CJK JP".into(),    // Linux
-                    "Microsoft YaHei".into(),     // Windows Chinese fallback
-                    "SimHei".into(),              // Windows Chinese fallback
-                    "Noto Sans CJK SC".into(),    // Linux Chinese fallback
-                    "Arial Unicode MS".into(),    // Mac fallback
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "ヒラギノ角ゴ Pro W3".into(), // Mac with Japanese environment
+                        "MS UI Gothic".into(),        // Windows
+                        "Noto Sans CJK JP".into(),    // Linux
+                        "Microsoft YaHei".into(),     // Windows Chinese fallback
+                        "SimHei".into(),              // Windows Chinese fallback
+                        "Noto Sans CJK SC".into(),    // Linux Chinese fallback
+                        "Arial Unicode MS".into(),    // Mac fallback
+                    ],
+                ),
             );
             player_lock.set_default_font(
                 DefaultFont::JapaneseGothicMono,
-                vec![
-                    "Osaka－等幅".into(),      // Mac with Japanese environment
-                    "MS Gothic".into(),        // Windows
-                    "Noto Sans CJK JP".into(), // Linux
-                    "NSimSun".into(),          // Windows Chinese fallback
-                    "SimSun".into(),           // Windows Chinese fallback
-                    "Noto Sans CJK SC".into(), // Linux Chinese fallback
-                    "Arial Unicode MS".into(), // Mac fallback
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "Osaka－等幅".into(),      // Mac with Japanese environment
+                        "MS Gothic".into(),        // Windows
+                        "Noto Sans CJK JP".into(), // Linux
+                        "NSimSun".into(),          // Windows Chinese fallback
+                        "SimSun".into(),           // Windows Chinese fallback
+                        "Noto Sans CJK SC".into(), // Linux Chinese fallback
+                        "Arial Unicode MS".into(), // Mac fallback
+                    ],
+                ),
             );
             player_lock.set_default_font(
                 DefaultFont::JapaneseMincho,
-                vec![
-                    "ヒラギノ明朝 Pro W3".into(), // Mac with Japanese environment
-                    "MS PMincho".into(),          // Windows
-                    "Noto Sans CJK JP".into(),    // Linux
-                    "SimSun".into(),              // Windows Chinese fallback
-                    "NSimSun".into(),             // Windows Chinese fallback
-                    "Noto Serif CJK SC".into(),   // Linux Chinese fallback
-                    "Noto Sans CJK SC".into(),    // Linux Chinese fallback
-                    "Arial Unicode MS".into(),    // Mac fallback
-                ],
+                available_default_fonts(
+                    &font_database,
+                    vec![
+                        "ヒラギノ明朝 Pro W3".into(), // Mac with Japanese environment
+                        "MS PMincho".into(),          // Windows
+                        "Noto Sans CJK JP".into(),    // Linux
+                        "SimSun".into(),              // Windows Chinese fallback
+                        "NSimSun".into(),             // Windows Chinese fallback
+                        "Noto Serif CJK SC".into(),   // Linux Chinese fallback
+                        "Noto Sans CJK SC".into(),    // Linux Chinese fallback
+                        "Arial Unicode MS".into(),    // Mac fallback
+                    ],
+                ),
             );
         }
 
@@ -582,6 +600,29 @@ impl PlayerController {
         {
             task.0.run();
         }
+    }
+}
+
+fn available_default_fonts(database: &fontdb::Database, candidates: Vec<String>) -> Vec<String> {
+    let available: Vec<_> = candidates
+        .iter()
+        .filter(|name| {
+            database
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(name.as_str())],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        })
+        .cloned()
+        .collect();
+
+    if available.is_empty() {
+        // Preserve the platform's first conventional fallback if fontdb could
+        // not identify any candidate. The UI backend may still know an alias.
+        candidates.into_iter().take(1).collect()
+    } else {
+        available
     }
 }
 
