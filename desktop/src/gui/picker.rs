@@ -10,6 +10,7 @@ use ruffle_frontend_utils::bundle::Bundle;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
+use std::thread::{self, ThreadId};
 use tokio::sync::oneshot;
 use walkdir::{DirEntry, WalkDir};
 use winit::{event_loop::EventLoopProxy, window::Window};
@@ -22,6 +23,7 @@ pub struct FilePicker {
 struct FilePickerData {
     event_loop: EventLoopProxy<RuffleEvent>,
     parent: Weak<Window>,
+    parent_thread: ThreadId,
     picking: AtomicBool,
     preferences: GlobalPreferences,
 }
@@ -36,6 +38,7 @@ impl FilePicker {
             data: Arc::new(FilePickerData {
                 event_loop,
                 parent,
+                parent_thread: thread::current().id(),
                 picking: AtomicBool::new(false),
                 preferences,
             }),
@@ -46,7 +49,12 @@ impl FilePicker {
     where
         F: FnOnce(AsyncFileDialog) -> O,
     {
-        if let Some(parent) = self.data.parent.upgrade() {
+        // Winit only exposes a Windows window handle on the event-loop thread.
+        // Async file pickers may be created from Tokio workers, in which case
+        // an unparented native dialog is preferable to a noisy HandleError.
+        if thread::current().id() == self.data.parent_thread
+            && let Some(parent) = self.data.parent.upgrade()
+        {
             dialog = dialog.set_parent(&parent);
         }
 
