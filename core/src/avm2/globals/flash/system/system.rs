@@ -21,7 +21,7 @@ use ruffle_common::sandbox::SandboxType;
 pub fn gc<'gc>(
     activation: &mut Activation<'_, 'gc>,
     _this: Value<'gc>,
-    _args: &[Value<'gc>],
+    _args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     activation.context.avm2.force_full_gc.set(true);
     Ok(Value::Undefined)
