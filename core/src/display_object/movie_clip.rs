@@ -51,7 +51,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use swf::extensions::ReadSwfExt;
 use swf::{ClipEventFlag, DefineBitsLossless, FrameLabelData, TagCode, UTF_8};
@@ -185,6 +185,14 @@ pub struct MovieClipData<'gc> {
     /// List of tags queued up for the current frame.
     queued_tags: RefCell<HashMap<Depth, QueuedTagList>>,
 
+    /// Duplicate timeline placements already reported for this clip.
+    ///
+    /// Some malformed movies repeat the same conflict every frame. Flash keeps
+    /// the first placement, but logging every repetition can generate tens of
+    /// megabytes of noise per hour.
+    #[collect(require_static)]
+    warned_queued_tag_conflicts: OnceCell<Box<RefCell<HashSet<QueuedTagConflict>>>>,
+
     /// Attached audio (AVM1)
     attached_audio: Lock<Option<NetStream<'gc>>>,
 
@@ -259,6 +267,7 @@ impl<'gc> MovieClipData<'gc> {
             queued_goto_frame: Cell::new(None),
             drop_target: Lock::new(None),
             queued_tags: Default::default(),
+            warned_queued_tag_conflicts: OnceCell::new(),
             hit_area: Lock::new(None),
             attached_audio: Lock::new(None),
             next_avm1_clip: Lock::new(None),
@@ -1803,12 +1812,16 @@ impl<'gc> MovieClip<'gc> {
                     tag_type: QueuedTagAction::Place(params.version),
                     tag_start: params.tag_start,
                 };
-                let mut queued_tags = self.0.queued_tags.borrow_mut();
+                let depth = params.place_object.depth as Depth;
+                let mut queued_tags = clip.0.queued_tags.borrow_mut();
                 let bucket = queued_tags
-                    .entry(params.place_object.depth as Depth)
+                    .entry(depth)
                     .or_insert_with(|| QueuedTagList::None);
-
-                bucket.queue_add(new_tag);
+                let conflict = bucket.queue_add(new_tag);
+                drop(queued_tags);
+                if let Some(existing) = conflict {
+                    clip.warn_queued_tag_conflict(depth, existing, new_tag);
+                }
 
                 return;
             }
@@ -4470,14 +4483,37 @@ impl<'gc, 'a> MovieClip<'gc> {
             tag_type: QueuedTagAction::Place(version),
             tag_start,
         };
+        let depth = place_object.depth as Depth;
         let mut queued_tags = self.0.queued_tags.borrow_mut();
         let bucket = queued_tags
-            .entry(place_object.depth as Depth)
+            .entry(depth)
             .or_insert_with(|| QueuedTagList::None);
-
-        bucket.queue_add(new_tag);
+        let conflict = bucket.queue_add(new_tag);
+        drop(queued_tags);
+        if let Some(existing) = conflict {
+            self.warn_queued_tag_conflict(depth, existing, new_tag);
+        }
 
         Ok(())
+    }
+
+    fn warn_queued_tag_conflict(self, depth: Depth, existing: QueuedTag, ignored: QueuedTag) {
+        let conflict = QueuedTagConflict {
+            depth,
+            existing,
+            ignored,
+        };
+        if self
+            .0
+            .warned_queued_tag_conflicts
+            .get_or_init(|| Box::new(RefCell::new(HashSet::new())))
+            .borrow_mut()
+            .insert(conflict)
+        {
+            tracing::warn!(
+                "Ignoring queued tag {ignored:?} at depth {depth}, already occupied by {existing:?}; further identical conflicts for this clip will be suppressed"
+            );
+        }
     }
 
     fn place_object(
@@ -4906,13 +4942,14 @@ pub enum QueuedTagList {
 }
 
 impl QueuedTagList {
-    fn queue_add(&mut self, add_tag: QueuedTag) {
+    fn queue_add(&mut self, add_tag: QueuedTag) -> Option<QueuedTag> {
+        let mut conflict = None;
         let new = match self {
             QueuedTagList::None => QueuedTagList::Add(add_tag),
             QueuedTagList::Add(existing) => {
                 // Flash player traces "Warning: Failed to place object at depth 1.",
                 // so let's log a warning too.
-                tracing::warn!("Ignoring queued tag {add_tag:?} at same depth as {existing:?}");
+                conflict = Some(*existing);
                 QueuedTagList::Add(*existing)
             }
             QueuedTagList::Remove(r) => QueuedTagList::RemoveThenAdd(*r, add_tag),
@@ -4920,6 +4957,7 @@ impl QueuedTagList {
         };
 
         *self = new;
+        conflict
     }
 
     fn queue_remove(&mut self, remove_tag: QueuedTag) {
@@ -4963,7 +5001,7 @@ impl QueuedTagList {
 /// A single tag we encountered this frame that we intend to process on a queue.
 ///
 /// No more than one queued action is allowed to be processed on-queue.
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct QueuedTag {
     pub tag_type: QueuedTagAction,
     pub tag_start: u64,
@@ -4972,10 +5010,17 @@ pub struct QueuedTag {
 /// The type of queued tag.
 ///
 /// The u8 parameter is the tag version.
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
 pub enum QueuedTagAction {
     Place(u8),
     Remove(u8),
+}
+
+#[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
+struct QueuedTagConflict {
+    depth: Depth,
+    existing: QueuedTag,
+    ignored: QueuedTag,
 }
 
 bitflags! {
