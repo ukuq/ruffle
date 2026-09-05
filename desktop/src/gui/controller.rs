@@ -726,10 +726,12 @@ fn load_system_fonts(
     queries.push((
         2,
         vec![
-            Family::Name("Noto Sans CJK"),     // Open font
-            Family::Name("Source Han Sans"),   // Open font, same as Noto Sans CJK
-            Family::Name("WenQuanYi Zen Hei"), // Open font
-            Family::Name("Arial Unicode MS"),  // MacOS
+            Family::Name("Noto Sans CJK"),      // Open font
+            Family::Name("Source Han Sans"),    // Open font, same as Noto Sans CJK
+            Family::Name("WenQuanYi Zen Hei"),  // Open font
+            Family::Name("Arial Unicode MS"),   // MacOS
+            Family::Name("Microsoft YaHei"),    // Windows Simplified Chinese
+            Family::Name("Microsoft JhengHei"), // Windows Traditional Chinese
         ],
     ));
 
@@ -754,19 +756,13 @@ fn load_system_fonts(
     // Chinese Simplified
     queries.push((
         3 + if is_sc { 0 } else { 1 },
-        vec![
-            Family::Name("Noto Sans CJK SC"), // Open font
-            Family::Name("Microsoft YaHei"),  // Windows
-        ],
+        vec![Family::Name("Noto Sans CJK SC")], // Open font
     ));
 
     // Chinese Traditional
     queries.push((
         3 + if is_tc { 0 } else { 1 },
-        vec![
-            Family::Name("Noto Sans CJK TC"),   // Open font
-            Family::Name("Microsoft JhengHei"), // Windows
-        ],
+        vec![Family::Name("Noto Sans CJK TC")], // Open font
     ));
 
     // Hebrew
@@ -830,7 +826,9 @@ fn register_family_font(
     let (name, fontdata) = match load_system_font(font_database, query) {
         Ok((name, fontdata)) => (name, fontdata),
         Err(e) => {
-            tracing::warn!("Failed to register {query:?} as {family}: {e}");
+            // Each query is an optional fallback; missing platform-specific
+            // families are expected and should not pollute normal logs.
+            tracing::debug!("Failed to register optional {query:?} as {family}: {e}");
             return;
         }
     };
