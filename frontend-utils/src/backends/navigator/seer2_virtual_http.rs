@@ -8,13 +8,15 @@ use ruffle_core::backend::navigator::{ErrorResponse, NavigationMethod, OwnedFutu
 use ruffle_core::loader::Error;
 use scrypt::{Params as ScryptParams, scrypt};
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use url::{Host, Url};
 
 const SEER2_PATH: &str = "/seer2";
@@ -23,6 +25,9 @@ const MAGIC_PATH: &str = "/seer2-next-client-hello";
 const FLASH_POLICY_PATH: &str = "/crossdomain.xml";
 const ROOT_DNS: &str = "next-client-root.733702.xyz";
 const LEGACY_UPSTREAM: &str = "http://seer2.61.com/";
+const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+const CACHE_PRUNE_INTERVAL_WRITES: usize = 64;
+const MAX_NETWORK_RECORDS: usize = 2_000;
 const FLASH_POLICY_DATA: &str = concat!(
     r#"<?xml version="1.0"?>"#,
     r#"<!DOCTYPE cross-domain-policy SYSTEM "#,
@@ -32,6 +37,264 @@ const FLASH_POLICY_DATA: &str = concat!(
 
 type Aes192CbcEncryptor = cbc::Encryptor<Aes192>;
 type Aes192CbcDecryptor = cbc::Decryptor<Aes192>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkRequestSource {
+    Pending,
+    Internal,
+    Override,
+    Cache,
+    VersionedUpstream,
+    LegacyUpstream,
+    Error,
+}
+
+impl NetworkRequestSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Internal => "Internal",
+            Self::Override => "Override",
+            Self::Cache => "Cache",
+            Self::VersionedUpstream => "Versioned",
+            Self::LegacyUpstream => "Legacy",
+            Self::Error => "Error",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkRequestRecord {
+    pub id: u64,
+    pub started_at_millis: u128,
+    pub duration_millis: Option<u128>,
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub source: NetworkRequestSource,
+    pub response_bytes: Option<usize>,
+    pub upstream_url: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Cumulative Seer2 cache metrics, matching seer2-next-client's
+/// `CacheMetricKey` counters.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Seer2CacheMetrics {
+    pub hit: u64,
+    pub cached: u64,
+    pub expired: u64,
+    pub checked: u64,
+    pub unchanged: u64,
+    pub changed: u64,
+    pub proxy: u64,
+    pub fetch: u64,
+}
+
+#[derive(Default)]
+struct CacheMetricCounters {
+    hit: AtomicU64,
+    cached: AtomicU64,
+    expired: AtomicU64,
+    checked: AtomicU64,
+    unchanged: AtomicU64,
+    changed: AtomicU64,
+    proxy: AtomicU64,
+    fetch: AtomicU64,
+}
+
+impl CacheMetricCounters {
+    fn snapshot(&self) -> Seer2CacheMetrics {
+        Seer2CacheMetrics {
+            hit: self.hit.load(Ordering::Relaxed),
+            cached: self.cached.load(Ordering::Relaxed),
+            expired: self.expired.load(Ordering::Relaxed),
+            checked: self.checked.load(Ordering::Relaxed),
+            unchanged: self.unchanged.load(Ordering::Relaxed),
+            changed: self.changed.load(Ordering::Relaxed),
+            proxy: self.proxy.load(Ordering::Relaxed),
+            fetch: self.fetch.load(Ordering::Relaxed),
+        }
+    }
+
+    fn report(&self, key: CacheMetricKey) {
+        let counter = match key {
+            CacheMetricKey::Hit => &self.hit,
+            CacheMetricKey::Cached => &self.cached,
+            CacheMetricKey::Expired => &self.expired,
+            CacheMetricKey::Checked => &self.checked,
+            CacheMetricKey::Unchanged => &self.unchanged,
+            CacheMetricKey::Changed => &self.changed,
+            CacheMetricKey::Proxy => &self.proxy,
+            CacheMetricKey::Fetch => &self.fetch,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CacheMetricKey {
+    Hit,
+    Cached,
+    Expired,
+    Checked,
+    Unchanged,
+    Changed,
+    Proxy,
+    Fetch,
+}
+
+fn cache_metric_counters() -> &'static CacheMetricCounters {
+    static METRICS: OnceLock<CacheMetricCounters> = OnceLock::new();
+    METRICS.get_or_init(CacheMetricCounters::default)
+}
+
+fn report_cache_metric(key: CacheMetricKey) {
+    cache_metric_counters().report(key);
+}
+
+pub fn seer2_cache_metrics() -> Seer2CacheMetrics {
+    cache_metric_counters().snapshot()
+}
+
+static RUNTIME_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Clear the volatile request/runtime cache. Reqwest does not maintain a
+/// Chromium-style response cache, so the native equivalent is to invalidate
+/// the cached version root and Bloom manifest.
+pub fn reset_seer2_version_manifest() {
+    RUNTIME_CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Seer2FileCacheClearResult {
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+    pub failed_files: usize,
+}
+
+/// Delete only files that match the Electron-compatible encrypted game-cache
+/// naming scheme, preserving unrelated files in the directory.
+pub fn clear_seer2_file_cache(directory: &Path) -> io::Result<Seer2FileCacheClearResult> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error),
+    };
+    let mut result = Seer2FileCacheClearResult::default();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                result.failed_files += 1;
+                tracing::warn!("Unable to inspect a Seer2 cache entry while clearing: {error}");
+                continue;
+            }
+        };
+        if !is_cache_file_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        match fs::remove_file(entry.path()) {
+            Ok(()) => {
+                result.removed_files += 1;
+                result.removed_bytes = result.removed_bytes.saturating_add(bytes);
+            }
+            Err(error) => {
+                result.failed_files += 1;
+                tracing::warn!(
+                    "Unable to remove Seer2 cache file {}: {error}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Default)]
+struct NetworkMonitorState {
+    next_id: u64,
+    records: VecDeque<NetworkRequestRecord>,
+}
+
+#[derive(Default)]
+pub struct NetworkMonitor {
+    state: Mutex<NetworkMonitorState>,
+}
+
+impl NetworkMonitor {
+    fn begin(&self, method: String, url: String) -> u64 {
+        let Ok(mut state) = self.state.lock() else {
+            return 0;
+        };
+        let id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        if state.records.len() == MAX_NETWORK_RECORDS {
+            state.records.pop_front();
+        }
+        state.records.push_back(NetworkRequestRecord {
+            id,
+            started_at_millis: system_time_millis(SystemTime::now()),
+            duration_millis: None,
+            method,
+            url,
+            status: None,
+            source: NetworkRequestSource::Pending,
+            response_bytes: None,
+            upstream_url: None,
+            error: None,
+        });
+        id
+    }
+
+    fn finish(
+        &self,
+        id: u64,
+        duration_millis: u128,
+        status: Option<u16>,
+        source: NetworkRequestSource,
+        response_bytes: Option<usize>,
+        upstream_url: Option<String>,
+        error: Option<String>,
+    ) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(record) = state.records.iter_mut().find(|record| record.id == id) {
+            record.duration_millis = Some(duration_millis);
+            record.status = status;
+            record.source = source;
+            record.response_bytes = response_bytes;
+            record.upstream_url = upstream_url;
+            record.error = error;
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<NetworkRequestRecord> {
+        self.state
+            .lock()
+            .map(|state| state.records.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.records.clear();
+        }
+    }
+}
+
+pub fn seer2_network_monitor() -> &'static NetworkMonitor {
+    static MONITOR: OnceLock<NetworkMonitor> = OnceLock::new();
+    MONITOR.get_or_init(NetworkMonitor::default)
+}
+
+struct Seer2Response {
+    response: InterceptedResponse,
+    source: NetworkRequestSource,
+    upstream_url: Option<String>,
+}
 
 /// In-process equivalent of the Electron Seer2 HTTP interceptor.
 ///
@@ -43,14 +306,21 @@ pub struct Seer2VirtualHttp {
     proxy_root: Option<PathBuf>,
     cache_directory: PathBuf,
     legacy_upstream: Url,
-    runtime: Arc<Mutex<Option<Runtime>>>,
+    runtime: Arc<Mutex<RuntimeCache>>,
     file_locks: Arc<Mutex<HashSet<String>>>,
+    initial_cache_maintenance: Arc<tokio::sync::OnceCell<()>>,
+    cache_writes: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct Runtime {
     root_url: Url,
     bloom: BloomFilter,
+}
+
+struct RuntimeCache {
+    generation: u64,
+    value: Option<Runtime>,
 }
 
 #[derive(Clone)]
@@ -71,12 +341,19 @@ impl Seer2VirtualHttp {
             );
         }
 
+        seer2_network_monitor().clear();
+
         Ok(Self {
             proxy_root,
             cache_directory,
             legacy_upstream: Url::parse(LEGACY_UPSTREAM).map_err(|error| error.to_string())?,
-            runtime: Arc::new(Mutex::new(None)),
+            runtime: Arc::new(Mutex::new(RuntimeCache {
+                generation: RUNTIME_CACHE_GENERATION.load(Ordering::SeqCst),
+                value: None,
+            })),
             file_locks: Arc::new(Mutex::new(HashSet::new())),
+            initial_cache_maintenance: Arc::new(tokio::sync::OnceCell::new()),
+            cache_writes: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -89,14 +366,20 @@ impl Seer2VirtualHttp {
         url: Url,
         method: NavigationMethod,
         client: Option<reqwest::Client>,
-    ) -> Result<InterceptedResponse, String> {
+    ) -> Result<Seer2Response, String> {
         let original_url = url.to_string();
         let url_path = url.path().to_string();
         tracing::debug!("Seer2 virtual HTTP {method} {original_url}");
 
         if url_path == MAGIC_PATH {
             let body = format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION")).into_bytes();
-            return Ok(response(original_url, 200, body));
+            return Ok(response(
+                original_url,
+                200,
+                body,
+                NetworkRequestSource::Internal,
+                None,
+            ));
         }
 
         if url_path == FLASH_POLICY_PATH {
@@ -104,27 +387,47 @@ impl Seer2VirtualHttp {
                 original_url,
                 200,
                 FLASH_POLICY_DATA.as_bytes().to_vec(),
+                NetworkRequestSource::Internal,
+                None,
             ));
         }
 
         if url_path.ends_with('/') || url_path.ends_with('\\') || !url_path.starts_with("/seer2/") {
-            return Ok(response(original_url, 403, b"not a valid path".to_vec()));
+            return Ok(response(
+                original_url,
+                403,
+                b"not a valid path".to_vec(),
+                NetworkRequestSource::Internal,
+                None,
+            ));
         }
 
         if let Some(file_path) = self.proxy_file_path(&url_path)
             && file_path.is_file()
         {
-            match fs::read(&file_path) {
-                Ok(body) => {
+            let read_path = file_path.clone();
+            match tokio::task::spawn_blocking(move || fs::read(read_path)).await {
+                Ok(Ok(body)) => {
                     tracing::info!("Seer2 virtual HTTP proxy file: {url_path}");
-                    return Ok(response(original_url, 200, body));
+                    report_cache_metric(CacheMetricKey::Proxy);
+                    return Ok(response(
+                        original_url,
+                        200,
+                        body,
+                        NetworkRequestSource::Override,
+                        None,
+                    ));
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::warn!(
                         "Failed to read Seer2 proxy file {}: {error}",
                         file_path.display()
                     );
                 }
+                Err(error) => tracing::warn!(
+                    "Failed to join Seer2 proxy file read for {}: {error}",
+                    file_path.display()
+                ),
             }
         }
 
@@ -133,8 +436,16 @@ impl Seer2VirtualHttp {
             .unwrap_or_default()
             .to_string();
         if bloom_path == BLOOM_PATH {
-            return Ok(response(original_url, 403, Vec::new()));
+            return Ok(response(
+                original_url,
+                403,
+                Vec::new(),
+                NetworkRequestSource::Internal,
+                None,
+            ));
         }
+
+        self.ensure_initial_cache_maintenance().await;
 
         let client =
             client.ok_or_else(|| "Network is unavailable for Seer2 virtual HTTP".to_string())?;
@@ -158,9 +469,18 @@ impl Seer2VirtualHttp {
             };
 
             if cache_is_current {
-                match read_with_decipher(&bloom_path, &cache_file) {
-                    Ok(body) => {
+                let read_key = bloom_path.clone();
+                let read_path = cache_file.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let body = read_with_decipher(&read_key, &read_path)?;
+                    touch_cache_file(&read_path);
+                    Ok::<_, io::Error>(body)
+                })
+                .await
+                {
+                    Ok(Ok(body)) => {
                         tracing::info!("Seer2 virtual HTTP cache hit: {url_path}");
+                        report_cache_metric(CacheMetricKey::Hit);
                         if !path_hit_bloom && let Some(modified) = modified {
                             self.spawn_cache_check(
                                 client.clone(),
@@ -169,28 +489,47 @@ impl Seer2VirtualHttp {
                                 modified,
                             );
                         }
-                        return Ok(response(original_url, 200, body));
+                        return Ok(response(
+                            original_url,
+                            200,
+                            body,
+                            NetworkRequestSource::Cache,
+                            None,
+                        ));
                     }
-                    Err(error) => tracing::warn!(
+                    Ok(Err(error)) => tracing::warn!(
                         "Failed to read Seer2 cache file {}: {error}",
+                        cache_file.display()
+                    ),
+                    Err(error) => tracing::warn!(
+                        "Failed to join Seer2 cache read for {}: {error}",
                         cache_file.display()
                     ),
                 }
             } else {
                 tracing::info!("Seer2 virtual HTTP cache expired: {url_path}");
+                report_cache_metric(CacheMetricKey::Expired);
             }
         }
 
-        let mut upstream_url = if path_hit_bloom {
-            runtime.root_url.join(bloom_path.trim_start_matches('/'))
+        let (upstream_url, source) = if path_hit_bloom {
+            (
+                runtime.root_url.join(bloom_path.trim_start_matches('/')),
+                NetworkRequestSource::VersionedUpstream,
+            )
         } else {
-            self.legacy_upstream
-                .join(bloom_path.trim_start_matches('/'))
-        }
-        .map_err(|error| error.to_string())?;
+            (
+                self.legacy_upstream
+                    .join(bloom_path.trim_start_matches('/')),
+                NetworkRequestSource::LegacyUpstream,
+            )
+        };
+        let mut upstream_url = upstream_url.map_err(|error| error.to_string())?;
         upstream_url.set_query(url.query());
+        let upstream_url_string = upstream_url.to_string();
 
         tracing::info!("Seer2 virtual HTTP fetch: {original_url} -> {upstream_url}");
+        report_cache_metric(CacheMetricKey::Fetch);
         let upstream_response = client
             .get(upstream_url)
             .send()
@@ -210,7 +549,7 @@ impl Seer2VirtualHttp {
             let cache_key = bloom_path.clone();
             drop(tokio::task::spawn_blocking(move || {
                 if let Err(error) =
-                    write_with_cipher(&cache_key, &cache_file, &cache_body, modified)
+                    server.store_cache_file(&cache_key, &cache_file, &cache_body, modified)
                 {
                     tracing::warn!(
                         "Failed to write Seer2 cache file {}: {error}",
@@ -221,11 +560,67 @@ impl Seer2VirtualHttp {
             }));
         }
 
-        Ok(response(original_url, status, body))
+        Ok(response(
+            original_url,
+            status,
+            body,
+            source,
+            Some(upstream_url_string),
+        ))
+    }
+
+    async fn ensure_initial_cache_maintenance(&self) {
+        let cache_directory = self.cache_directory.clone();
+        self.initial_cache_maintenance
+            .get_or_init(|| async move {
+                match tokio::task::spawn_blocking(move || {
+                    prune_cache_directory(&cache_directory, MAX_CACHE_BYTES)
+                })
+                .await
+                {
+                    Ok(Ok(result)) if result.removed_files > 0 => tracing::info!(
+                        "Pruned {} Seer2 cache files ({} bytes); remaining size: {} bytes",
+                        result.removed_files,
+                        result.removed_bytes,
+                        result.remaining_bytes
+                    ),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::warn!("Failed to prune Seer2 cache: {error}"),
+                    Err(error) => {
+                        tracing::warn!("Failed to join initial Seer2 cache maintenance: {error}")
+                    }
+                }
+            })
+            .await;
+    }
+
+    fn store_cache_file(
+        &self,
+        cache_key: &str,
+        cache_file: &Path,
+        body: &[u8],
+        modified: Option<SystemTime>,
+    ) -> io::Result<()> {
+        write_with_cipher(cache_key, cache_file, body, modified)?;
+        report_cache_metric(CacheMetricKey::Cached);
+        let writes = self.cache_writes.fetch_add(1, Ordering::Relaxed) + 1;
+        if writes.is_multiple_of(CACHE_PRUNE_INTERVAL_WRITES) {
+            let result = prune_cache_directory(&self.cache_directory, MAX_CACHE_BYTES)?;
+            if result.removed_files > 0 {
+                tracing::info!(
+                    "Pruned {} Seer2 cache files ({} bytes); remaining size: {} bytes",
+                    result.removed_files,
+                    result.removed_bytes,
+                    result.remaining_bytes
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn load_runtime(&self, client: &reqwest::Client) -> Result<Runtime, String> {
-        if let Some(runtime) = self.current_runtime() {
+        let generation = RUNTIME_CACHE_GENERATION.load(Ordering::SeqCst);
+        if let Some(runtime) = self.current_runtime(generation) {
             return Ok(runtime);
         }
 
@@ -273,13 +668,22 @@ impl Seer2VirtualHttp {
             .runtime
             .lock()
             .map_err(|_| "Virtual HTTP runtime lock was poisoned".to_string())?;
-        let stored = state.get_or_insert_with(|| runtime.clone()).clone();
+        let stored = if state.generation == generation {
+            state.value.get_or_insert_with(|| runtime.clone()).clone()
+        } else {
+            runtime
+        };
         tracing::info!("Seer2 virtual HTTP version root: {}", stored.root_url);
         Ok(stored)
     }
 
-    fn current_runtime(&self) -> Option<Runtime> {
-        self.runtime.lock().ok()?.clone()
+    fn current_runtime(&self, generation: u64) -> Option<Runtime> {
+        let mut state = self.runtime.lock().ok()?;
+        if state.generation != generation {
+            state.generation = generation;
+            state.value = None;
+        }
+        state.value.clone()
     }
 
     fn proxy_file_path(&self, url_path: &str) -> Option<PathBuf> {
@@ -334,6 +738,7 @@ impl Seer2VirtualHttp {
         cache_file: PathBuf,
         modified: SystemTime,
     ) -> Result<(), String> {
+        report_cache_metric(CacheMetricKey::Checked);
         let upstream_url = self
             .legacy_upstream
             .join(bloom_path.trim_start_matches('/'))
@@ -346,6 +751,7 @@ impl Seer2VirtualHttp {
             .map_err(|error| error.to_string())?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            report_cache_metric(CacheMetricKey::Unchanged);
             return Ok(());
         }
         if response.status() != reqwest::StatusCode::OK {
@@ -354,8 +760,10 @@ impl Seer2VirtualHttp {
 
         let new_modified = response_modified_time(&response);
         if new_modified == Some(modified) {
+            report_cache_metric(CacheMetricKey::Unchanged);
             return Ok(());
         }
+        report_cache_metric(CacheMetricKey::Changed);
         let body = response
             .bytes()
             .await
@@ -363,10 +771,17 @@ impl Seer2VirtualHttp {
             .to_vec();
 
         if self.lock_file(&bloom_path) {
-            let result = write_with_cipher(&bloom_path, &cache_file, &body, new_modified)
-                .map_err(|error| error.to_string());
-            self.unlock_file(&bloom_path);
-            result?;
+            let server = self.clone();
+            let cache_key = bloom_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = server
+                    .store_cache_file(&cache_key, &cache_file, &body, new_modified)
+                    .map_err(|error| error.to_string());
+                server.unlock_file(&cache_key);
+                result
+            })
+            .await
+            .map_err(|error| error.to_string())??;
         }
         Ok(())
     }
@@ -387,10 +802,37 @@ impl RequestInterceptor for Seer2VirtualHttp {
         let url = resolved_url.clone();
         let request_url = url.to_string();
         let method = request.method();
+        let monitor_id = seer2_network_monitor().begin(method.to_string(), request_url.clone());
+        let started = Instant::now();
         Some(Box::pin(async move {
-            spawn_tokio(async move { server.handle(url, method, client).await })
-                .await
-                .map_err(|error| fetch_error(&request_url, error))
+            let result = spawn_tokio(async move { server.handle(url, method, client).await }).await;
+            let duration = started.elapsed().as_millis();
+            match result {
+                Ok(result) => {
+                    seer2_network_monitor().finish(
+                        monitor_id,
+                        duration,
+                        Some(result.response.status),
+                        result.source,
+                        Some(result.response.body.len()),
+                        result.upstream_url,
+                        None,
+                    );
+                    Ok(result.response)
+                }
+                Err(error) => {
+                    seer2_network_monitor().finish(
+                        monitor_id,
+                        duration,
+                        None,
+                        NetworkRequestSource::Error,
+                        None,
+                        None,
+                        Some(error.clone()),
+                    );
+                    Err(fetch_error(&request_url, error))
+                }
+            }
         }))
     }
 }
@@ -441,13 +883,23 @@ impl BloomFilter {
     }
 }
 
-fn response(url: String, status: u16, body: Vec<u8>) -> InterceptedResponse {
-    InterceptedResponse {
-        url,
-        body,
-        text_encoding: None,
-        status,
-        redirected: false,
+fn response(
+    url: String,
+    status: u16,
+    body: Vec<u8>,
+    source: NetworkRequestSource,
+    upstream_url: Option<String>,
+) -> Seer2Response {
+    Seer2Response {
+        response: InterceptedResponse {
+            url,
+            body,
+            text_encoding: None,
+            status,
+            redirected: false,
+        },
+        source,
+        upstream_url,
     }
 }
 
@@ -529,6 +981,12 @@ fn read_with_decipher(url_path: &str, file_path: &Path) -> io::Result<Vec<u8>> {
     Ok(decrypted.to_vec())
 }
 
+fn touch_cache_file(file_path: &Path) {
+    if let Ok(file) = OpenOptions::new().write(true).open(file_path) {
+        let _ = file.set_times(FileTimes::new().set_accessed(SystemTime::now()));
+    }
+}
+
 fn write_with_cipher(
     url_path: &str,
     file_path: &Path,
@@ -556,6 +1014,92 @@ fn write_with_cipher(
     Ok(())
 }
 
+#[derive(Default)]
+struct CachePruneResult {
+    removed_files: usize,
+    removed_bytes: u64,
+    remaining_bytes: u64,
+}
+
+fn prune_cache_directory(directory: &Path, max_bytes: u64) -> io::Result<CachePruneResult> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!("Unable to inspect a Seer2 cache entry: {error}");
+                continue;
+            }
+        };
+        if !is_cache_file_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(
+                    "Unable to inspect Seer2 cache file {}: {error}",
+                    entry.path().display()
+                );
+                continue;
+            }
+        };
+        let bytes = metadata.len();
+        let last_used = metadata
+            .accessed()
+            .or_else(|_| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        total_bytes = total_bytes.saturating_add(bytes);
+        files.push((last_used, entry.path(), bytes));
+    }
+
+    let mut result = CachePruneResult {
+        remaining_bytes: total_bytes,
+        ..Default::default()
+    };
+    if total_bytes <= max_bytes {
+        return Ok(result);
+    }
+
+    files.sort_unstable_by_key(|(last_used, _, _)| *last_used);
+    for (_, path, bytes) in files {
+        if result.remaining_bytes <= max_bytes {
+            break;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                result.removed_files += 1;
+                result.removed_bytes = result.removed_bytes.saturating_add(bytes);
+                result.remaining_bytes = result.remaining_bytes.saturating_sub(bytes);
+            }
+            Err(error) => tracing::debug!(
+                "Unable to remove Seer2 cache file {} during pruning: {error}",
+                path.display()
+            ),
+        }
+    }
+
+    Ok(result)
+}
+
+fn is_cache_file_name(name: &str) -> bool {
+    let Some((digest, length)) = name.split_once('_') else {
+        return false;
+    };
+    digest.len() == 32
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !length.is_empty()
+        && length.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +1122,108 @@ mod tests {
             read_with_decipher("/Client.swf", &path).expect("cache read"),
             expected
         );
+    }
+
+    #[test]
+    fn network_monitor_tracks_completed_requests() {
+        let monitor = NetworkMonitor::default();
+        let id = monitor.begin("GET".to_string(), "http://seer2.client/test".to_string());
+        monitor.finish(
+            id,
+            12,
+            Some(200),
+            NetworkRequestSource::Cache,
+            Some(42),
+            None,
+            None,
+        );
+        let records = monitor.snapshot();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].duration_millis, Some(12));
+        assert_eq!(records[0].status, Some(200));
+        assert_eq!(records[0].source, NetworkRequestSource::Cache);
+        assert_eq!(records[0].response_bytes, Some(42));
+    }
+
+    #[test]
+    fn cache_metrics_track_all_report_types() {
+        let counters = CacheMetricCounters::default();
+        for key in [
+            CacheMetricKey::Hit,
+            CacheMetricKey::Cached,
+            CacheMetricKey::Expired,
+            CacheMetricKey::Checked,
+            CacheMetricKey::Unchanged,
+            CacheMetricKey::Changed,
+            CacheMetricKey::Proxy,
+            CacheMetricKey::Fetch,
+        ] {
+            counters.report(key);
+        }
+        assert_eq!(
+            counters.snapshot(),
+            Seer2CacheMetrics {
+                hit: 1,
+                cached: 1,
+                expired: 1,
+                checked: 1,
+                unchanged: 1,
+                changed: 1,
+                proxy: 1,
+                fetch: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn clearing_file_cache_preserves_unrelated_files() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let cache_file = directory.path().join("00000000000000000000000000000000_1");
+        let unrelated = directory.path().join("keep-me.txt");
+        fs::write(&cache_file, [0; 8]).expect("cache file");
+        fs::write(&unrelated, [0; 3]).expect("unrelated file");
+
+        let result = clear_seer2_file_cache(directory.path()).expect("clear file cache");
+        assert_eq!(
+            result,
+            Seer2FileCacheClearResult {
+                removed_files: 1,
+                removed_bytes: 8,
+                failed_files: 0,
+            }
+        );
+        assert!(!cache_file.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn cache_pruning_keeps_recent_files_under_the_limit() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let old = directory.path().join("00000000000000000000000000000000_1");
+        let recent = directory.path().join("11111111111111111111111111111111_1");
+        fs::write(&old, [0; 8]).expect("old cache file");
+        fs::write(&recent, [0; 8]).expect("recent cache file");
+        OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .expect("open old file")
+            .set_times(
+                FileTimes::new().set_accessed(UNIX_EPOCH + std::time::Duration::from_secs(1)),
+            )
+            .expect("set old access time");
+        OpenOptions::new()
+            .write(true)
+            .open(&recent)
+            .expect("open recent file")
+            .set_times(
+                FileTimes::new().set_accessed(UNIX_EPOCH + std::time::Duration::from_secs(2)),
+            )
+            .expect("set recent access time");
+
+        let result = prune_cache_directory(directory.path(), 8).expect("prune cache");
+        assert_eq!(result.removed_files, 1);
+        assert!(!old.exists());
+        assert!(recent.exists());
     }
 
     #[test]

@@ -1,7 +1,11 @@
 mod fetch;
 mod seer2_virtual_http;
 
-pub use seer2_virtual_http::Seer2VirtualHttp;
+pub use seer2_virtual_http::{
+    NetworkRequestRecord, NetworkRequestSource, Seer2CacheMetrics, Seer2FileCacheClearResult,
+    Seer2VirtualHttp, clear_seer2_file_cache, reset_seer2_version_manifest, seer2_cache_metrics,
+    seer2_network_monitor,
+};
 
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
