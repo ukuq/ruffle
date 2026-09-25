@@ -1144,6 +1144,7 @@ fn render_self_with_scaling_grid<'gc>(
                 matrix: local_piece_matrix,
                 color_transform: Default::default(),
                 perspective_projection: None,
+                tz: Default::default(),
             };
 
             context.transform_stack.push(&piece_transform);
