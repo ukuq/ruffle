@@ -1471,14 +1471,12 @@ pub fn draw<'gc>(
     let mut cache_draws = vec![];
     let mut bitmap_cache_rebuilds_used = 0;
     let mut bitmap_cache_filtered_rebuilds = 0;
-    let mut bitmap_cache_rebuilds_skipped = 0;
     let mut render_context = RenderContext {
         renderer: context.renderer,
         commands: CommandList::new(),
         cache_draws: &mut cache_draws,
         bitmap_cache_rebuilds_used: &mut bitmap_cache_rebuilds_used,
         bitmap_cache_filtered_rebuilds: &mut bitmap_cache_filtered_rebuilds,
-        bitmap_cache_rebuilds_skipped: &mut bitmap_cache_rebuilds_skipped,
         gc_context: context.gc_context,
         library: context.library,
         ui: context.ui,

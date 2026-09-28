@@ -2719,33 +2719,49 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                 return false;
             }
 
-            if !options.contains(HitTestOptions::SKIP_CHILDREN) {
-                let mut clip_depth = 0;
-
-                for child in self.iter_render_list() {
-                    if child.clip_depth() > 0 {
-                        if child.hit_test_shape(
-                            context,
-                            point,
-                            HitTestOptions::SKIP_MASK | HitTestOptions::SKIP_INVISIBLE,
-                        ) {
-                            clip_depth = 0;
-                        } else {
-                            clip_depth = child.clip_depth();
-                        }
-                    } else if child.depth() >= clip_depth
-                        && child.hit_test_shape(context, point, options)
-                    {
-                        return true;
-                    }
-                }
+            // The renderer clips and transforms each of the nine pieces separately.
+            // Map the hit point back through the same piece before testing content.
+            let mut hit_points = SmallVec::<[(Point<Twips>, Matrix); 1]>::new();
+            if let Some(grid) =
+                super::scaling_grid_info(self.into(), &super::RenderOptions::default())
+            {
+                hit_points.extend(super::scaling_grid_hit_test_points(
+                    &grid,
+                    self.local_to_global_matrix(),
+                    point,
+                ));
+            } else {
+                hit_points.push((point, local_matrix));
             }
 
-            let point = local_matrix * point;
-            if let Some(drawing) = self.drawing()
-                && drawing.hit_test(point, &local_matrix)
-            {
-                return true;
+            for (content_point, piece_local_matrix) in hit_points {
+                if !options.contains(HitTestOptions::SKIP_CHILDREN) {
+                    let mut clip_depth = 0;
+
+                    for child in self.iter_render_list() {
+                        if child.clip_depth() > 0 {
+                            if child.hit_test_shape(
+                                context,
+                                content_point,
+                                HitTestOptions::SKIP_MASK | HitTestOptions::SKIP_INVISIBLE,
+                            ) {
+                                clip_depth = 0;
+                            } else {
+                                clip_depth = child.clip_depth();
+                            }
+                        } else if child.depth() >= clip_depth
+                            && child.hit_test_shape(context, content_point, options)
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                if let Some(drawing) = self.drawing()
+                    && drawing.hit_test(piece_local_matrix * point, &piece_local_matrix)
+                {
+                    return true;
+                }
             }
         }
 

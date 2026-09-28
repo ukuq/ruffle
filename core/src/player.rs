@@ -333,10 +333,9 @@ pub struct Player {
 
     run_state: RunState,
     needs_render: bool,
-    bitmap_cache_rebuilds_allowed: u64,
+    bitmap_cache_rebuilds_total: u64,
     bitmap_cache_filtered_rebuilds: u64,
     bitmap_cache_rebuilds_max_frame: usize,
-    bitmap_cache_rebuilds_skipped: u64,
 
     renderer: Box<dyn RenderBackend>,
     audio: Box<dyn AudioBackend>,
@@ -2109,14 +2108,12 @@ impl Player {
             let mut cache_draws = vec![];
             let mut bitmap_cache_rebuilds_used = 0;
             let mut bitmap_cache_filtered_rebuilds = 0;
-            let mut bitmap_cache_rebuilds_skipped = 0;
             let mut render_context = RenderContext {
                 renderer: this.renderer.deref_mut(),
                 commands: CommandList::new(),
                 cache_draws: &mut cache_draws,
                 bitmap_cache_rebuilds_used: &mut bitmap_cache_rebuilds_used,
                 bitmap_cache_filtered_rebuilds: &mut bitmap_cache_filtered_rebuilds,
-                bitmap_cache_rebuilds_skipped: &mut bitmap_cache_rebuilds_skipped,
                 gc_context,
                 library: &mut gc_root.library,
                 ui: this.ui.deref(),
@@ -2146,8 +2143,8 @@ impl Player {
 
             gc_root.library.sweep_font_caches();
 
-            this.bitmap_cache_rebuilds_allowed = this
-                .bitmap_cache_rebuilds_allowed
+            this.bitmap_cache_rebuilds_total = this
+                .bitmap_cache_rebuilds_total
                 .saturating_add(bitmap_cache_rebuilds_used as u64);
             this.bitmap_cache_filtered_rebuilds = this
                 .bitmap_cache_filtered_rebuilds
@@ -2155,9 +2152,6 @@ impl Player {
             this.bitmap_cache_rebuilds_max_frame = this
                 .bitmap_cache_rebuilds_max_frame
                 .max(bitmap_cache_rebuilds_used);
-            this.bitmap_cache_rebuilds_skipped = this
-                .bitmap_cache_rebuilds_skipped
-                .saturating_add(bitmap_cache_rebuilds_skipped);
             (cache_draws, commands)
         });
 
@@ -2200,12 +2194,11 @@ impl Player {
 
     pub fn diagnostic_info(&self) -> String {
         format!(
-            "{} bitmap_cache_rebuilds_allowed={} bitmap_cache_filtered_rebuilds={} bitmap_cache_rebuilds_max_frame={} bitmap_cache_rebuild_skips={}",
+            "{} bitmap_cache_rebuilds_total={} bitmap_cache_filtered_rebuilds={} bitmap_cache_rebuilds_max_frame={}",
             self.renderer.diagnostic_info(),
-            self.bitmap_cache_rebuilds_allowed,
+            self.bitmap_cache_rebuilds_total,
             self.bitmap_cache_filtered_rebuilds,
-            self.bitmap_cache_rebuilds_max_frame,
-            self.bitmap_cache_rebuilds_skipped
+            self.bitmap_cache_rebuilds_max_frame
         )
     }
 
@@ -3166,10 +3159,9 @@ impl PlayerBuilder {
                     RunState::Suspended
                 },
                 needs_render: true,
-                bitmap_cache_rebuilds_allowed: 0,
+                bitmap_cache_rebuilds_total: 0,
                 bitmap_cache_filtered_rebuilds: 0,
                 bitmap_cache_rebuilds_max_frame: 0,
-                bitmap_cache_rebuilds_skipped: 0,
                 self_reference: self_ref.clone(),
                 load_behavior: self.load_behavior,
                 spoofed_url: self.spoofed_url.clone(),

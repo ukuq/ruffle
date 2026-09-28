@@ -958,8 +958,6 @@ struct DrawCacheInfo {
     filters: Vec<Filter>,
 }
 
-const MAX_BITMAP_CACHE_REBUILDS_PER_FRAME: usize = 32;
-
 #[derive(Clone, Copy)]
 struct ScalingGridAxis {
     source: [Twips; 4],
@@ -1096,6 +1094,65 @@ fn slice_axis_transform(
     Some((scale, translate))
 }
 
+fn scaling_grid_hit_test_points(
+    grid: &ScalingGridInfo,
+    object_to_global: Matrix,
+    point: Point<Twips>,
+) -> Vec<(Point<Twips>, Matrix)> {
+    let parent_to_global = object_to_global * grid.object_matrix_inverse;
+    let Some(global_to_parent) = parent_to_global.inverse() else {
+        return Vec::new();
+    };
+    let parent_point = global_to_parent * point;
+    let mut hit_points = Vec::new();
+
+    for y in 0..3 {
+        let Some((scale_y, translate_y)) = slice_axis_transform(
+            grid.y.source[y],
+            grid.y.source[y + 1],
+            grid.y.dest[y],
+            grid.y.dest[y + 1],
+        ) else {
+            continue;
+        };
+        for x in 0..3 {
+            let Some((scale_x, translate_x)) = slice_axis_transform(
+                grid.x.source[x],
+                grid.x.source[x + 1],
+                grid.x.dest[x],
+                grid.x.dest[x + 1],
+            ) else {
+                continue;
+            };
+            let piece_matrix = Matrix {
+                a: scale_x,
+                d: scale_y,
+                tx: translate_x,
+                ty: translate_y,
+                ..Default::default()
+            };
+            let Some(parent_to_piece) = piece_matrix.inverse() else {
+                continue;
+            };
+            let local_point = parent_to_piece * parent_point;
+            let source_rect = Rectangle {
+                x_min: grid.x.source[x],
+                x_max: grid.x.source[x + 1],
+                y_min: grid.y.source[y],
+                y_max: grid.y.source[y + 1],
+            };
+            if source_rect.contains(local_point) {
+                hit_points.push((
+                    object_to_global * local_point,
+                    parent_to_piece * global_to_parent,
+                ));
+            }
+        }
+    }
+
+    hit_points
+}
+
 fn render_self_with_scaling_grid<'gc>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
@@ -1199,6 +1256,22 @@ mod tests {
         assert_eq!(center_scale, -3.5);
         assert_eq!(center_translate, px(260));
     }
+
+    #[test]
+    fn scaling_grid_hit_test_maps_stretched_center_to_source() {
+        let axis = scaling_grid_axis(2.0, px(0), px(0), px(20), px(60), px(100));
+        let grid = ScalingGridInfo {
+            object_matrix_inverse: Matrix::scale(0.5, 0.5),
+            x: axis,
+            y: axis,
+        };
+        let point = Point::new(px(125), px(125));
+        let hits = scaling_grid_hit_test_points(&grid, Matrix::scale(2.0, 2.0), point);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, Point::new(px(100), px(100)));
+        assert_eq!(hits[0].1 * point, Point::new(px(50), px(50)));
+    }
 }
 
 pub fn render_base<'gc>(
@@ -1263,45 +1336,30 @@ pub fn render_base<'gc>(
                 let draw_offset = Point::new(filter_rect.x_min, filter_rect.y_min);
                 if cache.is_dirty(&base_transform.matrix, width, height) {
                     let is_filtered_rebuild = !filters.is_empty();
-                    let defer_rebuild =
-                        *context.bitmap_cache_rebuilds_used >= MAX_BITMAP_CACHE_REBUILDS_PER_FRAME;
-                    if defer_rebuild {
-                        *context.bitmap_cache_rebuilds_skipped =
-                            context.bitmap_cache_rebuilds_skipped.saturating_add(1);
-                        cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
-                            bitmap,
-                            dirty: false,
-                            base_transform,
-                            bounds,
-                            draw_offset: cache.draw_offset,
-                            filters: Vec::new(),
-                        });
-                    } else {
-                        *context.bitmap_cache_rebuilds_used =
-                            context.bitmap_cache_rebuilds_used.saturating_add(1);
-                        if is_filtered_rebuild {
-                            *context.bitmap_cache_filtered_rebuilds =
-                                context.bitmap_cache_filtered_rebuilds.saturating_add(1);
-                        }
-                        cache.update(
-                            context.renderer,
-                            base_transform.matrix,
-                            width,
-                            height,
-                            filter_rect.width() as u32,
-                            filter_rect.height() as u32,
-                            draw_offset,
-                            swf_version,
-                        );
-                        cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
-                            bitmap,
-                            dirty: true,
-                            base_transform,
-                            bounds,
-                            draw_offset,
-                            filters,
-                        });
+                    *context.bitmap_cache_rebuilds_used =
+                        context.bitmap_cache_rebuilds_used.saturating_add(1);
+                    if is_filtered_rebuild {
+                        *context.bitmap_cache_filtered_rebuilds =
+                            context.bitmap_cache_filtered_rebuilds.saturating_add(1);
                     }
+                    cache.update(
+                        context.renderer,
+                        base_transform.matrix,
+                        width,
+                        height,
+                        filter_rect.width() as u32,
+                        filter_rect.height() as u32,
+                        draw_offset,
+                        swf_version,
+                    );
+                    cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
+                        bitmap,
+                        dirty: true,
+                        base_transform,
+                        bounds,
+                        draw_offset,
+                        filters,
+                    });
                 } else {
                     cache_info = cache.bitmap().map(|bitmap| DrawCacheInfo {
                         bitmap,
@@ -1357,7 +1415,6 @@ pub fn render_base<'gc>(
                 cache_draws: context.cache_draws,
                 bitmap_cache_rebuilds_used: &mut *context.bitmap_cache_rebuilds_used,
                 bitmap_cache_filtered_rebuilds: &mut *context.bitmap_cache_filtered_rebuilds,
-                bitmap_cache_rebuilds_skipped: &mut *context.bitmap_cache_rebuilds_skipped,
                 gc_context: context.gc_context,
                 library: context.library,
                 ui: context.ui,
