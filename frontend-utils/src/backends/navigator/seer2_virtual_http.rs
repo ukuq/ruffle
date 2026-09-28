@@ -365,6 +365,8 @@ impl Seer2VirtualHttp {
         &self,
         url: Url,
         method: NavigationMethod,
+        request_body: Option<(Vec<u8>, String)>,
+        request_headers: Vec<(String, String)>,
         client: Option<reqwest::Client>,
     ) -> Result<Seer2Response, String> {
         let original_url = url.to_string();
@@ -402,7 +404,8 @@ impl Seer2VirtualHttp {
             ));
         }
 
-        if let Some(file_path) = self.proxy_file_path(&url_path)
+        if method == NavigationMethod::Get
+            && let Some(file_path) = self.proxy_file_path(&url_path)
             && file_path.is_file()
         {
             let read_path = file_path.clone();
@@ -453,7 +456,8 @@ impl Seer2VirtualHttp {
         let path_hit_bloom = runtime.bloom.contains(&bloom_path);
         let cache_file = self.cache_file_path(&url_path);
 
-        if !self.is_file_locked(&bloom_path)
+        if method == NavigationMethod::Get
+            && !self.is_file_locked(&bloom_path)
             && let Ok(metadata) = fs::metadata(&cache_file)
             && metadata.is_file()
         {
@@ -530,11 +534,11 @@ impl Seer2VirtualHttp {
 
         tracing::info!("Seer2 virtual HTTP fetch: {original_url} -> {upstream_url}");
         report_cache_metric(CacheMetricKey::Fetch);
-        let upstream_response = client
-            .get(upstream_url)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
+        let upstream_response =
+            build_upstream_request(&client, upstream_url, method, request_body, request_headers)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
         let status = upstream_response.status().as_u16();
         let modified = response_modified_time(&upstream_response);
         let body = upstream_response
@@ -543,7 +547,7 @@ impl Seer2VirtualHttp {
             .map_err(|error| error.to_string())?
             .to_vec();
 
-        if status == 200 && self.lock_file(&bloom_path) {
+        if method == NavigationMethod::Get && status == 200 && self.lock_file(&bloom_path) {
             let server = self.clone();
             let cache_body = body.clone();
             let cache_key = bloom_path.clone();
@@ -787,6 +791,26 @@ impl Seer2VirtualHttp {
     }
 }
 
+fn build_upstream_request(
+    client: &reqwest::Client,
+    url: Url,
+    method: NavigationMethod,
+    body: Option<(Vec<u8>, String)>,
+    headers: Vec<(String, String)>,
+) -> reqwest::RequestBuilder {
+    let mut request = match method {
+        NavigationMethod::Get => client.get(url),
+        NavigationMethod::Post => client.post(url),
+    };
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    if let Some((body, mime)) = body {
+        request = request.header("Content-Type", mime).body(body);
+    }
+    request
+}
+
 impl RequestInterceptor for Seer2VirtualHttp {
     fn intercept(
         &self,
@@ -802,10 +826,21 @@ impl RequestInterceptor for Seer2VirtualHttp {
         let url = resolved_url.clone();
         let request_url = url.to_string();
         let method = request.method();
+        let request_body = request.body().clone();
+        let request_headers = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
         let monitor_id = seer2_network_monitor().begin(method.to_string(), request_url.clone());
         let started = Instant::now();
         Some(Box::pin(async move {
-            let result = spawn_tokio(async move { server.handle(url, method, client).await }).await;
+            let result = spawn_tokio(async move {
+                server
+                    .handle(url, method, request_body, request_headers, client)
+                    .await
+            })
+            .await;
             let duration = started.elapsed().as_millis();
             match result {
                 Ok(result) => {
@@ -1103,6 +1138,33 @@ fn is_cache_file_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_request_preserves_post_body_and_headers() {
+        let request = build_upstream_request(
+            &reqwest::Client::new(),
+            Url::parse("http://example.com/seer2/action").unwrap(),
+            NavigationMethod::Post,
+            Some((
+                b"action=play".to_vec(),
+                "application/x-www-form-urlencoded".into(),
+            )),
+            vec![("X-Seer2-Request".into(), "test".into())],
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(&b"action=play"[..])
+        );
+        assert_eq!(
+            request.headers()["Content-Type"],
+            "application/x-www-form-urlencoded"
+        );
+        assert_eq!(request.headers()["X-Seer2-Request"], "test");
+    }
 
     #[test]
     fn electron_cache_filename_is_compatible() {

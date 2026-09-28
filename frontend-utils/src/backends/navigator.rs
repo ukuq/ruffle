@@ -362,12 +362,11 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 request_builder = request_builder.body(body_data);
 
                 let response = spawn_tokio(request_builder.send()).await.map_err(|e| {
-                    let message = if e.is_connect() {
-                        format!("Connection failed for {processed_url}: {e:?}")
+                    let inner = if e.is_connect() {
+                        Error::InvalidDomain(processed_url.to_string())
                     } else {
-                        e.to_string()
+                        Error::FetchError(e.to_string())
                     };
-                    let inner = Error::FetchError(message);
                     ErrorResponse {
                         url: processed_url.to_string(),
                         error: inner,
