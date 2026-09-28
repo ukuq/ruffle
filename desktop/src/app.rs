@@ -11,7 +11,7 @@ use anyhow::Error;
 use gilrs::{Event, EventType, Gilrs};
 use ruffle_core::events::{ImeEvent, ImeNotification, PlayerNotification};
 use ruffle_core::swf::HeaderExt;
-use ruffle_core::{FloatDuration, PlayerEvent};
+use ruffle_core::{FloatDuration, PlayerEvent, StageScaleMode};
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
@@ -362,7 +362,11 @@ impl MainWindow {
 
     fn sync_player_viewport(&mut self, viewport_size: PhysicalSize<u32>) {
         let viewport_scale_factor = self.gui.window().scale_factor();
-        let (width, height) = if let Some(movie_size) = self.movie_size {
+        let no_scale = self
+            .player
+            .get()
+            .is_some_and(|mut player| player.scale_mode() == StageScaleMode::NoScale);
+        let (width, height) = if let Some(movie_size) = self.movie_size.filter(|_| !no_scale) {
             (
                 (movie_size.width * viewport_scale_factor).round().max(1.0) as u32,
                 (movie_size.height * viewport_scale_factor).round().max(1.0) as u32,
@@ -444,6 +448,7 @@ impl MainWindow {
         // [NA] This used to be called `MainEventsCleared`, but I think the behaviour is different now.
         // We should look at changing our tick to happen somewhere else if we see any behavioural problems.
         if matches!(self.loaded, LoadingState::Loaded) {
+            self.sync_player_viewport(self.gui.window().inner_size());
             let new_time = Instant::now();
             let dt = FloatDuration::from_std(new_time.duration_since(self.time));
             if dt.as_millis() > 0.0 {
