@@ -781,7 +781,10 @@ impl RuffleInstanceBuilder {
 
             match self.device_font_renderer {
                 DeviceFontRenderer::Embedded => self.setup_fonts(&mut core),
-                DeviceFontRenderer::Canvas => self.setup_canvas_fonts(&mut core),
+                DeviceFontRenderer::Canvas => {
+                    self.setup_fonts(&mut core);
+                    self.setup_canvas_fonts(&mut core);
+                }
             }
         }
 
